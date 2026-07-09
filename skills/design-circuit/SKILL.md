@@ -182,22 +182,30 @@ simulation, sourcing/BOM) reads it.
   means every component silently failed.
 - **Default render path = hierarchy + constructive placement + A\* wiring.**
   `generate` defaults to `renderer_options={"seed_placement": True,
-  "auto_stub": False}` — deterministic-ish constructive seed placement followed by
-  A\* routing that draws **real wires** (not label stubs). **Author the design
-  hierarchically** (`@subcircuit`, ~5–15 parts/sheet) so each sheet stays routable;
-  this is the path a new build should try **first**. Verify it with the
-  `drawing_connectivity` gate below.
-- **Fall back to `auto_stub` when the wired path doesn't come out clean.** At
-  higher per-sheet density the A\* router can box a power pin in (a net stubs to
-  labels and a pin dangles → `pin_not_connected` / drawing≠netlist), and a
-  multi-sheet hierarchy is **ERC-noisier** on power nets: rails driven by a
-  top-sheet header/source aren't seen as *driven* on child sheets
-  (`power_pin_not_driven` proliferates) and the PWR_FLAG autofix's revert guard
-  trips on the cross-sheet netlist so it applies nothing (known limitation R1). If
-  ERC won't clear or `drawing_connectivity` reports `equiv=False`, pass
+  "auto_stub": False}` — constructive seed placement followed by A\* routing that
+  draws **real wires** (not label stubs). **Author the design hierarchically**
+  (`@subcircuit`, ~5–15 parts/sheet) so each sheet stays routable; this is the
+  path a new build should try **first**. Verify it with the `drawing_connectivity`
+  gate below. The render is now **byte-reproducible** (fixed default seed; run it
+  twice and diff to confirm) and handles power + hierarchy structurally:
+  - **Power nets never enter the router.** Every power net (`drive=POWER` or a
+    stock power name) renders as a `power:*` symbol at each pin; a non-stock rail
+    name (e.g. `VBIAS_28V`) gets a cloned in-file `(power)` symbol. Each *undriven*
+    rail (fed by a header/connector, no `PWROUT` pin) gets exactly ONE `PWR_FLAG`
+    project-wide, so `power_pin_not_driven` is cleared **structurally, across
+    sheets** — you do NOT need to add manual `PWR_FLAG` parts, and the ERC autofix
+    finds nothing to do.
+  - **Cross-sheet nets connect by name** via a `global_label` on each pin (no
+    dangling hierarchical labels / sheet pins). A 2-sheet differential-amp
+    hierarchy now renders **ERC 0 / `equiv=True`**.
+  - **Split routed nets self-heal.** If the router boxes a pin in, a net-aware
+    emission audit drops a unifying name label so the drawing still matches the
+    netlist.
+- **Fall back to `auto_stub` only if a dense sheet still won't clear.** At very
+  high per-sheet density the A\* router may still fail; if ERC won't clear or
+  `drawing_connectivity` reports `equiv=False`, pass
   `renderer_options={"auto_stub": True}` (stubs power/high-fanout nets to labels
-  before routing — the **clean path for a dense flat sheet**, gates ERC-clean),
-  and/or flatten a too-dense sheet.
+  before routing — a robust label-only path), and/or split a too-dense sheet.
 - **`drawing_connectivity` gate** (inside `generate`, report-only): it exports a
   netlist from the *rendered* schematic and compares it to the logical `.net`.
   `result["steps"]["drawing_connectivity"]["equiv"]` must be `True`; `equiv=False`
