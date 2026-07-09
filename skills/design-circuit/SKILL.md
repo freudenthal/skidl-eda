@@ -184,9 +184,15 @@ simulation, sourcing/BOM) reads it.
   renderer by default (stubs high-fanout/power nets to labels before routing so
   the A* router never boxes a power pin in). Keep it on for ≥~15-part flat
   sheets; override with `renderer_options={"auto_stub": False}` only for a small
-  sheet where you want fully-wired output. **Prefer a hierarchy over one dense
-  flat sheet** when the part count climbs — the no-`auto_stub` router still
-  struggles at ~20 parts on one sheet.
+  sheet where you want fully-wired output.
+- **Flat + `auto_stub` is the clean path for ≤~25-part designs.** A multi-sheet
+  hierarchy is currently **ERC-noisier**, not cleaner: rails driven by a top-sheet
+  header/source aren't seen as *driven* on child sheets (`power_pin_not_driven`
+  proliferates) and the PWR_FLAG autofix's revert guard trips on the cross-sheet
+  netlist, so it applies nothing. Reach for hierarchy for *logical* organization
+  of a genuinely large design, not to relieve router density at this scale — and
+  expect to hand-add PWR_FLAGs / power symbols per sheet if you do. (Known
+  limitation R1; the flat deliverable path gates ERC-clean.)
 - **`drawing_connectivity` gate** (inside `generate`, report-only): it exports a
   netlist from the *rendered* schematic and compares it to the logical `.net`.
   `result["steps"]["drawing_connectivity"]["equiv"]` must be `True`; `equiv=False`
