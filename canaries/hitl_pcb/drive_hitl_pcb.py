@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Phase-6 capstone driver: the HITL + PCB integration gate.
+"""HITL + PCB round-trip driver for the SiPM-TIA canary.
 
 Closes the skidl-eda loop end to end -- from authored skidl, out to a KiCad
 project a human edits, back to regenerated skidl source, and on to a scored
@@ -17,7 +17,7 @@ PCB:
   5. PCB        -- skidl_eda.plan_pcb() (skidl-layout) plans a placement and
                    emits a scored .kicad_pcb
 
-Run:  python drive_phase6.py
+Run:  python drive_hitl_pcb.py
 Exit 0 iff every stage passed (SKIP for an unavailable backend is not a failure).
 
 Requires the full stack: KiCad-10 libraries + kicad-cli, and the peer packages
@@ -38,7 +38,7 @@ sys.path.insert(0, ROOT)
 
 from skidl_eda import setup_kicad10  # noqa: E402
 
-OUT = os.path.join(HERE, "_phase6_out")
+OUT = os.path.join(HERE, "_hitl_pcb_out")
 RESULTS = {}
 _STATE = {}
 
@@ -69,7 +69,7 @@ def stage_generate():
     have_cli = bool(find_kicad_cli())
     result = generate(
         T.sipm_tia(),
-        "SiPM_TIA_Phase6",
+        "SiPM_TIA_HITL",
         output_dir=OUT,
         run_erc_gate=have_cli,
         run_save_gate=have_cli,
@@ -162,7 +162,7 @@ def stage_pcb():
     import sipm_tia_skidl as T
 
     setup_kicad10()
-    pcb_path = os.path.join(OUT, "SiPM_TIA_Phase6.kicad_pcb")
+    pcb_path = os.path.join(OUT, "SiPM_TIA_HITL.kicad_pcb")
     res = plan_pcb(T.sipm_tia(), pcb_path)
     print(f"    score={res['score']} overlaps={res['overlaps']} "
           f"missing={res['missing_refs']} hpwl={res['hpwl_total_mm']:.1f}mm "
@@ -175,7 +175,7 @@ def stage_pcb():
 
 def main() -> int:
     import platform
-    print(f"=== Phase-6 HITL+PCB capstone (skidl-eda)  "
+    print(f"=== SiPM-TIA HITL + PCB round-trip (skidl-eda)  "
           f"Python {platform.python_version()} ===")
     stages = (
         ("GENERATE", stage_generate),
@@ -199,7 +199,7 @@ def main() -> int:
         print(f"  {k:12} {v}")
     failed = [k for k, v in RESULTS.items() if v == "FAIL"]
     verdict = "NO-GO" if failed else "GO"
-    print(f"PHASE-6 VERDICT: {verdict}" + (f" (failed: {failed})" if failed else ""))
+    print(f"VERDICT: {verdict}" + (f" (failed: {failed})" if failed else ""))
     return 1 if failed else 0
 
 

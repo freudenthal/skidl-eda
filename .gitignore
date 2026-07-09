@@ -5,8 +5,8 @@ build/
 dist/
 .pytest_cache/
 .venv*/
-# canary / driver output dirs (drive_phaseN.py)
-_phase*_out*/
+# canary / driver output dirs
+_*_out*/
 # skidl / kicad-cli scratch written into CWD
 *.erc
 *.log
