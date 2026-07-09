@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skidl-eda"
+version = "0.0.0.dev0"
+description = "AI circuit-design loop harness on the skidl stack (gates, sourcing, sim entry, eval, diagnostics, E2E)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "freudenthal" }]
+keywords = ["kicad", "skidl", "eda", "circuit", "spice", "pcb"]
+
+# Peer packages (local editable installs during development; not yet on PyPI).
+# skidl (fork, feat/kicad10-backend), skidl-layout, kicad-sch-api are installed
+# from the sibling checkouts. Declared here for documentation; pinned installs
+# happen via `uv pip install -e ./skidl -e ./skidl-layout` in the dev env.
+dependencies = [
+    "skidl>=2.2.3",
+    "simp_sexp>=0.3.1",
+]
+
+[project.optional-dependencies]
+# Live SPICE simulation via skidl.sim (PySpice + a loadable ngspice, e.g. KiCad's
+# bundled ngspice.dll on Windows).
+sim = ["PySpice>=1.5"]
+# PCB placement + layout-quality metrics.
+layout = ["skidl-layout>=0.1.0"]
+# Human-in-the-loop KiCad round-trip / edit / MCP interface.
+hitl = ["kicad-sch-api>=0.5.6"]
+# Optional keyed sourcing (DigiKey); keyless JLC search needs no extras.
+sourcing = ["requests>=2.28"]
+test = ["pytest>=7"]
+
+[project.scripts]
+skidl-eda-bootstrap = "skidl_eda.bootstrap:main"
+
+[tool.setuptools.packages.find]
+include = ["skidl_eda*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv*/
+# canary / driver output dirs (drive_phaseN.py)
+_phase*_out*/
+# skidl / kicad-cli scratch written into CWD
+*.erc
+*.log
+*_sklib.py
+*-erc.rpt
+*.kicad_prl
+sim_plots/
