@@ -454,8 +454,21 @@ def _apply_power_flag_autofixes(
 
     for fs in loaded.values():
         if fs["dirty"]:
-            fs["sch"].save()
+            _save_lenient(fs["sch"])
     return added
+
+
+def _save_lenient(sch) -> None:
+    """Save a ksa schematic without letting a *pre-existing* odd designator abort
+    the autofix. The autofix only adds well-formed ``#FLG`` refs, so a bad ref must
+    have come from the source schematic (a foreign ``J_PWR``, a multi-unit
+    ``U1.uA``) -- validating only what we touched keeps the whole PWR_FLAG pass from
+    dying at save (B2). Falls back to a plain save on an older kicad-sch-api that
+    lacks the ``validate`` kwarg."""
+    try:
+        sch.save(validate="modified")
+    except TypeError:
+        sch.save()
 
 
 # --------------------------------------------------------------------------- #
