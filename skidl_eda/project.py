@@ -177,8 +177,12 @@ def generate(
             ``<project_dir>/<project_name>.kicad_pcb``).
         fp_lib_dirs: footprint-library roots for the PCB step (auto-discovered
             from a standard KiCad install when omitted).
-        renderer_options: extra kwargs forwarded to ``generate_schematic``
-            (e.g. ``auto_stub``, ``seed_placement``).
+        renderer_options: extra kwargs forwarded to ``generate_schematic`` that
+            override the defaults. The default render path is
+            ``{"seed_placement": True, "auto_stub": False}`` -- constructive
+            placement + A* wiring (a fully wired schematic). Pass
+            ``{"auto_stub": True}`` to fall back to the stub-to-labels path (the
+            clean path for dense flat sheets).
         kicad_cli: explicit path to ``kicad-cli`` (else auto-discovered).
 
     Returns:
@@ -219,11 +223,17 @@ def generate(
         steps["netlist"] = {"ok": False, "file": str(netlist_file), "error": str(e)}
 
     # --- 2. schematic (fork KiCad-10 renderer) ------------------------------
-    # Default auto_stub=True: the DiffAmp run showed it strictly improved the
-    # drawing (ERC 2->0, off-grid warnings gone, power pins stubbed instead of the
-    # A* router boxing a power pin in and leaving it label-less; B3/3c). The caller
-    # can still override it via renderer_options.
-    render_opts = {"auto_stub": True}
+    # Default render path: constructive seed placement + A* wiring (NOT auto_stub),
+    # so the harness produces a fully *wired* schematic and a new end-to-end test
+    # exercises that path first. This is the ambitious path -- at higher per-sheet
+    # density the A* router can still box a power pin in (drawing diverges from the
+    # netlist; the drawing_connectivity gate flags it) and a multi-sheet hierarchy
+    # is ERC-noisier on cross-sheet power nets. Author hierarchically (@subcircuit,
+    # ~5-15 parts/sheet) to keep each sheet routable. If a design won't come out
+    # clean on this path, fall back with renderer_options={"auto_stub": True} (stubs
+    # power/high-fanout nets to labels before routing -- the clean path for dense
+    # flat sheets). Everything here is overridable via renderer_options.
+    render_opts = {"seed_placement": True, "auto_stub": False}
     render_opts.update(renderer_options or {})
     try:
         circuit.generate_schematic(

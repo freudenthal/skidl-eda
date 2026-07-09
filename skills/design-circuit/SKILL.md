@@ -180,26 +180,31 @@ simulation, sourcing/BOM) reads it.
   must contain a `(symbol` block per component and a `(property "Reference"
   "<ref>"` for each expected reference. A ~1 KB schematic with only a text box
   means every component silently failed.
-- **Routing on a dense flat sheet.** `generate` passes `auto_stub=True` to the
-  renderer by default (stubs high-fanout/power nets to labels before routing so
-  the A* router never boxes a power pin in). Keep it on for ≥~15-part flat
-  sheets; override with `renderer_options={"auto_stub": False}` only for a small
-  sheet where you want fully-wired output.
-- **Flat + `auto_stub` is the clean path for ≤~25-part designs.** A multi-sheet
-  hierarchy is currently **ERC-noisier**, not cleaner: rails driven by a top-sheet
-  header/source aren't seen as *driven* on child sheets (`power_pin_not_driven`
-  proliferates) and the PWR_FLAG autofix's revert guard trips on the cross-sheet
-  netlist, so it applies nothing. Reach for hierarchy for *logical* organization
-  of a genuinely large design, not to relieve router density at this scale — and
-  expect to hand-add PWR_FLAGs / power symbols per sheet if you do. (Known
-  limitation R1; the flat deliverable path gates ERC-clean.)
+- **Default render path = hierarchy + constructive placement + A\* wiring.**
+  `generate` defaults to `renderer_options={"seed_placement": True,
+  "auto_stub": False}` — deterministic-ish constructive seed placement followed by
+  A\* routing that draws **real wires** (not label stubs). **Author the design
+  hierarchically** (`@subcircuit`, ~5–15 parts/sheet) so each sheet stays routable;
+  this is the path a new build should try **first**. Verify it with the
+  `drawing_connectivity` gate below.
+- **Fall back to `auto_stub` when the wired path doesn't come out clean.** At
+  higher per-sheet density the A\* router can box a power pin in (a net stubs to
+  labels and a pin dangles → `pin_not_connected` / drawing≠netlist), and a
+  multi-sheet hierarchy is **ERC-noisier** on power nets: rails driven by a
+  top-sheet header/source aren't seen as *driven* on child sheets
+  (`power_pin_not_driven` proliferates) and the PWR_FLAG autofix's revert guard
+  trips on the cross-sheet netlist so it applies nothing (known limitation R1). If
+  ERC won't clear or `drawing_connectivity` reports `equiv=False`, pass
+  `renderer_options={"auto_stub": True}` (stubs power/high-fanout nets to labels
+  before routing — the **clean path for a dense flat sheet**, gates ERC-clean),
+  and/or flatten a too-dense sheet.
 - **`drawing_connectivity` gate** (inside `generate`, report-only): it exports a
   netlist from the *rendered* schematic and compares it to the logical `.net`.
   `result["steps"]["drawing_connectivity"]["equiv"]` must be `True`; `equiv=False`
   means the drawing doesn't connect a pin the circuit does (a routing-fallback or
-  placement gap) — treat it like an ERC error and route back to Phase 3/4 (turn on
-  `auto_stub`, or split into sheets). Pass `drawing_must_match=True` to make it
-  gate `result["ok"]`.
+  placement gap on the wired path) — treat it like an ERC error and route back to
+  Phase 3/4 (fall back to `auto_stub`, or split into sheets). Pass
+  `drawing_must_match=True` to make it gate `result["ok"]`.
 - **Multi-unit parts** (dual/quad op-amps with a dedicated power unit) render as
   one shared reference `U1` with `(unit N)` — connect the power unit's `V+`/`V-`
   pins like any pin and they place correctly. References may contain `_`/`.`
