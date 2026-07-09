@@ -121,6 +121,8 @@ def generate(
     erc_autofix: bool = True,
     run_save_gate: bool = True,
     run_footprint_check: bool = True,
+    run_drawing_connectivity: bool = True,
+    drawing_must_match: bool = False,
     export_bom: bool = True,
     export_pdf_schematic: bool = True,
     erc_must_be_clean: bool = False,
@@ -150,6 +152,12 @@ def generate(
             degrades to a read-only run if absent. Default True.
         run_save_gate: run the KiCad save-crash gate.
         run_footprint_check: warn on footprint ids absent from KiCad libraries.
+        run_drawing_connectivity: export a netlist from the rendered schematic and
+            structurally compare it to the logical ``.net`` (catches a drawing that
+            doesn't connect a pin the circuit does; B3). Report-only by default --
+            sets ``steps["drawing_connectivity"]["equiv"]``.
+        drawing_must_match: if True, a drawing-vs-netlist mismatch (equiv=False)
+            fails the project. Off by default (report-only).
         export_bom: export a BOM CSV.
         export_pdf_schematic: export a schematic PDF.
         erc_must_be_clean: if True, remaining ERC *errors* (after any autofix)
@@ -211,12 +219,18 @@ def generate(
         steps["netlist"] = {"ok": False, "file": str(netlist_file), "error": str(e)}
 
     # --- 2. schematic (fork KiCad-10 renderer) ------------------------------
+    # Default auto_stub=True: the DiffAmp run showed it strictly improved the
+    # drawing (ERC 2->0, off-grid warnings gone, power pins stubbed instead of the
+    # A* router boxing a power pin in and leaving it label-less; B3/3c). The caller
+    # can still override it via renderer_options.
+    render_opts = {"auto_stub": True}
+    render_opts.update(renderer_options or {})
     try:
         circuit.generate_schematic(
             tool=KICAD10,
             filepath=str(project_dir),
             top_name=top_name,
-            **(renderer_options or {}),
+            **render_opts,
         )
         ok = schematic_file.exists() and schematic_file.stat().st_size > 0
         steps["schematic"] = {"ok": ok, "file": str(schematic_file)}
@@ -289,6 +303,31 @@ def generate(
         steps["save_gate"] = res
         save_hard_fail = not res["ok"] and not res["skipped"]
 
+    # --- 6b. drawing-vs-netlist connectivity gate (report-only by default) ---
+    drawing_hard_fail = False
+    if (
+        run_drawing_connectivity
+        and steps.get("schematic", {}).get("ok")
+        and steps.get("netlist", {}).get("ok")
+    ):
+        try:
+            from .gates.drawing_connectivity import check_drawing_connectivity
+
+            dc = check_drawing_connectivity(
+                schematic_file, netlist_file, kicad_cli=kicad_cli
+            )
+            steps["drawing_connectivity"] = dc
+            if drawing_must_match and dc.get("equiv") is False:
+                drawing_hard_fail = True
+        except Exception as e:  # noqa: BLE001 - never break the loop
+            logger.warning("drawing connectivity gate errored: %s", e)
+            steps["drawing_connectivity"] = {
+                "ok": False,
+                "skipped": False,
+                "equiv": None,
+                "error": str(e),
+            }
+
     # --- 7. exports (skip-tolerant, non-gating) -----------------------------
     if export_bom and steps.get("schematic", {}).get("ok"):
         steps["bom"] = export_bom_csv(
@@ -334,7 +373,9 @@ def generate(
             steps["pcb"] = {"ok": True, "skipped": False, "error": str(e)}
 
     result["erc_clean"] = erc_clean
-    result["ok"] = gen_ok and not erc_hard_fail and not save_hard_fail
+    result["ok"] = (
+        gen_ok and not erc_hard_fail and not save_hard_fail and not drawing_hard_fail
+    )
     return result
 
 
@@ -362,6 +403,16 @@ def summarize(result: Dict[str, Any]) -> str:
                 + ")"
             )
             state = "WARN" if step.get("errors") else state  # report-only
+        elif name == "drawing_connectivity" and not step.get("skipped"):
+            equiv = step.get("equiv")
+            ndiff = len(step.get("messages") or [])
+            if equiv is True:
+                extra = " (matches netlist)"
+            elif equiv is False:
+                extra = f" (DIVERGES: {ndiff} diff)"
+                state = "WARN"  # report-only unless drawing_must_match
+            else:
+                extra = ""
         elif name == "footprint":
             extra = f" ({step.get('warnings', 0)} warn)"
         elif name == "bom" and step.get("success"):

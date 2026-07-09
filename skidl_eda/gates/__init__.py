@@ -5,6 +5,10 @@ All DSL-agnostic: they read ``.kicad_sch`` / netlists and shell ``kicad-cli``, o
 compare in-memory circuit views.
 """
 
+from .drawing_connectivity import (  # noqa: F401
+    DrawingConnectivityUnavailable,
+    check_drawing_connectivity,
+)
 from .equivalence import canonical_from_cs, canonical_from_skidl, compare  # noqa: F401
 from .erc import ErcReport, ErcUnavailable, classify, erc_gate, run_erc  # noqa: F401
 from .footprint_check import check_circuit_footprints, check_footprints  # noqa: F401
@@ -29,4 +33,6 @@ __all__ = [
     "ErcUnavailable",
     "find_kicad_cli",
     "KicadCliUnavailable",
+    "check_drawing_connectivity",
+    "DrawingConnectivityUnavailable",
 ]
