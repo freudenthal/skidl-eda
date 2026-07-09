@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Phase-0 go/no-go driver: run the whole SiPM-TIA canary through the loop.
+"""Validation driver: run the whole SiPM-TIA canary through the loop.
 
 Sequence (each an independent gate; overall PASS iff all pass):
 
@@ -9,7 +9,7 @@ Sequence (each an independent gate; overall PASS iff all pass):
   4. GATES     -- generate KiCad netlist + schematic; save-crash gate (kicad-cli)
   5. LAYOUT    -- skidl-layout placement + quality metric
 
-Run:  python drive_phase0.py
+Run:  python drive_validation.py
 Exit 0 iff every stage passed (SKIP for an unavailable backend is not a failure).
 """
 
@@ -61,7 +61,7 @@ def stage_gates():
     setup_kicad10()
     import sipm_tia_skidl as sk
     from skidl import KICAD10
-    out = os.path.join(HERE, "_phase0_out")
+    out = os.path.join(HERE, "_validation_out")
     os.makedirs(out, exist_ok=True)
     c = sk.sipm_tia()
     c.generate_netlist(tool=KICAD10, file_=os.path.join(out, "SiPM_TIA.net"))
@@ -96,7 +96,7 @@ def stage_layout():
 
 def main() -> int:
     import platform
-    print(f"=== Phase-0 SiPM-TIA canary (skidl-eda)  Python {platform.python_version()} ===")
+    print(f"=== SiPM-TIA validation (skidl-eda)  Python {platform.python_version()} ===")
     for key, fn in (("EQUIV", stage_equiv), ("SIM", stage_sim),
                     ("GATES", stage_gates), ("LAYOUT", stage_layout)):
         print(f"[{key}]")
@@ -113,7 +113,7 @@ def main() -> int:
         print(f"  {k:8} {v}")
     failed = [k for k, v in RESULTS.items() if v == "FAIL"]
     verdict = "NO-GO" if failed else "GO"
-    print(f"PHASE-0 VERDICT: {verdict}" + (f" (failed: {failed})" if failed else ""))
+    print(f"VERDICT: {verdict}" + (f" (failed: {failed})" if failed else ""))
     return 1 if failed else 0
 
 

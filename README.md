@@ -186,8 +186,8 @@ KiCad-10 symbol directory only.
 in skidl, with drivers that exercise the full loop end to end:
 
 ```bash
-python canaries/sipm_tia/drive_phase0.py   # equivalence | sim | gates | layout
-python canaries/hitl_pcb/drive_hitl_pcb.py # generate | edit | regenerate | PCB
+python canaries/sipm_tia/drive_validation.py  # equivalence | sim | gates | layout
+python canaries/hitl_pcb/drive_hitl_pcb.py    # generate | edit | regenerate | PCB
 ```
 
 ## License
