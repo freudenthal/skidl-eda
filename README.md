@@ -1,130 +1,195 @@
 # skidl-eda
 
-The AI circuit-design loop harness, shrunk onto the **skidl** stack. Peer package
-to:
+An AI circuit-design loop harness built on the [**skidl**](https://github.com/devbisme/skidl)
+stack. It turns a skidl circuit description into a KiCad-openable project and
+wraps it with the pieces an automated (or assisted) design loop needs:
+verification gates, part sourcing, SPICE simulation entry, an aggregate quality
+metric, a diagnostics knowledge base, human-in-the-loop regeneration from an
+edited schematic, and a scored PCB placement step.
 
-- **skidl** (fork `feat/kicad10-backend`) — authoring DSL + KiCad-10 backend +
-  A\* schematic router + `skidl.sim` SPICE macromodels
-- **skidl-layout** — PCB placement engine + layout-quality metrics
-- **kicad-sch-api** — byte-perfect KiCad round-trip / edit / MCP = the
-  human-in-the-loop interface
+## What it does
 
-Everything here lives **outside** `devbisme/skidl` (the maintainer's #315 request).
+- **Project generation** — render a built skidl `Circuit` to a KiCad-10 project
+  (`.kicad_pro` + `.kicad_sch` + `.net`) and run it through a gate pipeline.
+- **Gates** — structural netlist equivalence, ERC (with a net-aware `PWR_FLAG`
+  autofix that reverts on regression), a KiCad save-crash gate, and a footprint
+  check.
+- **Exports** — BOM (CSV) and schematic PDF via `kicad-cli`.
+- **Sourcing** — keyless JLCPCB search, a DigiKey/JLC availability facade, and a
+  standalone symbol finder.
+- **Simulation** — a thin entry over `skidl.sim` to turn acceptance criteria
+  into PASS/FAIL.
+- **Evaluation** — a weighted 0–100 design-quality grade (power connectivity,
+  floating pins, decoupling coverage, net naming) plus a golden-netlist
+  regression oracle.
+- **Diagnostics** — a failure-pattern knowledge base mapping symptoms to
+  probable cause, solutions, and a test tree.
+- **HITL regeneration** — regenerate runnable skidl source from a schematic a
+  human edited in KiCad, verified by a round-trip equivalence check.
+- **PCB step** — plan a board placement and emit a scored `.kicad_pcb`.
 
-## Status
+## Architecture
 
-**Phase 0 (canary go/no-go): EXECUTED — verdict GO.** The SiPM TIA is authored
-natively in skidl (`canaries/sipm_tia/sipm_tia_skidl.py`) and driven end-to-end
-through sim + gates + layout + netlist-equivalence vs the circuit-synth twin.
-See `PHASE0_REPORT.md`. Runs green on **both Python 3.13 and 3.14**.
+`skidl-eda` is a peer package that composes several libraries:
 
-```
-python canaries/sipm_tia/drive_phase0.py
-# EQUIV PASS | SIM PASS | GATES PASS | LAYOUT PASS -> PHASE-0 VERDICT: GO
-```
+| Package | Role |
+|---|---|
+| **skidl** | authoring DSL + KiCad-10 backend + schematic router + `skidl.sim` |
+| **skidl-codegen** | KiCad schematic → runnable skidl source (HITL regeneration) |
+| **skidl-layout** | PCB placement engine + layout-quality metrics |
+| **kicad-sch-api** | byte-perfect KiCad round-trip / edit interface for the human-in-the-loop step |
 
-**Phase 1 (scaffold + drop-ins): mostly EXECUTED.** The DSL-agnostic gate
-pipeline, exporters, and sourcing are ported with tests (24 pass on 3.13, 23+1
-skip on 3.14):
+The core (generation + gates + evaluation + diagnostics + sourcing) depends only
+on `skidl` and `kicad-cli`. The HITL and PCB steps pull in `skidl-codegen` and
+`skidl-layout` respectively, and degrade gracefully (a clear "unavailable"
+result) when those optional peers are not installed.
 
-- `skidl_eda.gates` — `equivalence` (structural netlist compare), `netlist_compare`
-  (kicad-cli-netlist pin-partition), `save_gate` (KiCad save-crash gate),
-  `erc` (ERC runner — read-only), `footprint_check`, `kicad_cli` (resolver).
-- `skidl_eda.export` — `bom`, `pdf` (via kicad-cli).
-- `skidl_eda.sourcing` — `find_symbol`, `jlcsearch` (keyless JLC),
-  `availability` (honest-skip DigiKey/JLC facade).
+## Installation
 
-**Phase 1 ERC PWR_FLAG autofix: EXECUTED.** `skidl_eda.gates.erc_gate()` runs
-ERC and, for each net flagged `power_pin_not_driven`, adds a `power:PWR_FLAG`
-wired to the net's real driving pin (net resolved from a `kicad-cli` netlist
-export; sheet-aware), iterating with **revert-on-regression**. It edits via
-kicad-sch-api (the `hitl` extra) and degrades to a report-only no-op if that is
-absent. It is wired into `generate(erc_autofix=True)` by default, so the pipeline
-autofixes before the save gate and exports. On the canary this takes ERC from
-6 errors (3 `power_pin_not_driven`) to 3 (the residual are design-level
-unused-pin errors the autofix correctly leaves alone).
+`skidl-eda` and its peers are installed from local checkouts (editable during
+development). Python 3.13 or 3.14 is supported.
 
-**Phase 2 (orchestration entry): EXECUTED.** `skidl_eda.project.generate()`
-renders a built skidl `Circuit` with the fork KiCad-10 renderer, scaffolds a
-**KiCad-openable** project (`.kicad_pro` + `.kicad_sch` + `.net` — skidl emits no
-project file, so the scaffold lives here), runs the file-level pipeline
-(footprint check → read-only ERC → save-crash gate → BOM + PDF), and returns the
-loop result dict:
+```bash
+# create an environment (uv shown; venv/pip works the same)
+uv venv --python 3.13 .venv
 
-```python
-from skidl_eda import setup_kicad10, generate, summarize
-setup_kicad10()
-from sipm_tia_skidl import sipm_tia
-result = generate(sipm_tia(), "SiPM_TIA", output_dir="build")
-print(summarize(result))
-# project: build/SiPM_TIA -> OK
-#   netlist PASS | schematic PASS | project PASS | footprint PASS
-#   erc WARN (6 err / 10 warn, 3 PWR_FLAG-autofixable) | save_gate PASS
-#   bom PASS (6 parts) | pdf PASS
-```
-
-`ok` = generation + save-crash gate (the openability contract); ERC is
-report-only (`result["erc_clean"]`, per-step `autofixes_applied` /
-`non_autofixable_errors`) unless you pass `erc_must_be_clean=True`.
-
-**Phase 3 (skills rewrite + bootstrap): EXECUTED.**
-`skills/design-circuit/SKILL.md` is the iterative design loop rewritten to skidl
-authoring (`Part(...)`, `@subcircuit`, `skidl_eda.generate`, `skidl.sim`,
-`Sim_*`); `skills/new-project/SKILL.md` + `skidl_eda.bootstrap` (console script
-`skidl-eda-bootstrap`) scaffold a fresh project folder in one step. See
-`skills/README.md`.
-
-**Phase 4 (eval harness): EXECUTED.** `skidl_eda.evaluation` — an aggregate,
-regression-trackable design-quality metric: a `Circuit → spec` adapter, a
-weighted 0-100 structural grade (power connectivity, floating pins, decoupling
-coverage, net naming), and a golden-netlist regression oracle. Wired into
-`generate(evaluate=True)` (report-only) and callable directly:
-
-```python
-from skidl_eda import evaluation as E
-report = E.evaluate_circuit(build())              # structural grade
-report = E.evaluate_circuit(build(), reference="golden.net")  # + oracle
-print(E.summarize(report))
-```
-
-(lachlan's oracle/judge/quality_score live in his private hosted engine, not the
-public repo, so this is a native rebuild of the documented design, not a verbatim
-vendor.)
-
-**Phase 5 (diagnostics): EXECUTED.** `skidl_eda.diagnostics` — the circuit-synth
-`debugging/` knowledge base (failure patterns, symptom/measurement analysis,
-troubleshooting trees), which turned out to be entirely DSL-agnostic and ports
-verbatim. `diagnose(symptoms)` maps observed symptoms → probable cause +
-solutions + a test tree; `diagnose_design(evaluation=…, erc=…)` feeds the
-design's own gate output in as symptoms:
-
-```python
-from skidl_eda import diagnostics as D
-print(D.diagnose(["3.3V rail low", "regulator hot"]).summary())
-# [80%] power: Overloaded voltage regulator -> Replace regulator ... + test tree
-```
-
-**Later phase** (HITL + PCB integration) per
-`../workingdocs/plans/skidl-eda-plan.md`.
-
-## Dev environment
-
-skidl authoring + KiCad-10 backend + `skidl.sim` + `skidl-layout` all run on
-Python 3.13 **and** 3.14. The recommended dev env installs the sibling checkouts
-editable:
-
-```
-uv venv --python 3.14 .venv          # or 3.13
-uv pip install -e ../skidl -e ../skidl-layout "PySpice>=1.5"
+# install the peer packages editable, then skidl-eda
+uv pip install -e ../skidl -e ../skidl-layout -e ../skidl-codegen -e ../kicad-sch-api
 uv pip install -e .
 ```
 
-### The KiCad-10 symbol-library trap (why `skidl_eda.env` exists)
+Optional extras:
 
-Do **not** set `lib_search_paths["kicad10"] = ["."] + default_lib_paths()` (the
-recipe in skidl's own sim tests). When the process runs at/under a checkout
-carrying skidl's `tests/test_data`, the resolver descends from `"."` and binds
-to the bundled **KiCad-6** libraries — silently shadowing KiCad-10 symbols and
-hiding KiCad-10-only parts (e.g. `Amplifier_Operational:ADA4817-1ACP` simply is
-not found). Call `skidl_eda.setup_kicad10()` instead: it points at the real
-KiCad-10 symbol dir only.
+```bash
+uv pip install -e ".[sim]"       # PySpice for live skidl.sim simulation
+uv pip install -e ".[sourcing]"  # requests, for keyed DigiKey sourcing
+```
+
+A working KiCad 10 install (for its symbol/footprint libraries and `kicad-cli`)
+is required for the gate, export, and PCB steps.
+
+## Usage
+
+### Point skidl at the KiCad-10 libraries
+
+Always call `setup_kicad10()` before building a circuit. It binds skidl to the
+real KiCad-10 symbol directory (see [the library note](#the-kicad-10-symbol-library-note)
+below for why this matters).
+
+```python
+from skidl_eda import setup_kicad10
+setup_kicad10()
+```
+
+### Generate a KiCad project
+
+```python
+from skidl_eda import setup_kicad10, generate, summarize
+
+setup_kicad10()
+from my_design import build            # your skidl circuit factory
+result = generate(build(), "MyBoard", output_dir="build")
+print(summarize(result))
+# project: build/MyBoard -> OK
+#   netlist PASS | schematic PASS | project PASS | footprint PASS
+#   erc WARN (... ) | save_gate PASS | bom PASS | pdf PASS | evaluation PASS (grade 82/100)
+```
+
+`generate()` returns a result dict. `ok` reflects generation plus the
+save-crash gate (the "opens in KiCad" contract). ERC is report-only by default
+(`result["erc_clean"]`, per-step `autofixes_applied`); pass
+`erc_must_be_clean=True` to make remaining ERC errors fail the run. The ERC
+`PWR_FLAG` autofix runs by default (`erc_autofix=True`) and needs `kicad-sch-api`.
+
+### Evaluate design quality
+
+```python
+from skidl_eda import evaluation as E
+
+report = E.evaluate_circuit(build())                          # structural grade
+report = E.evaluate_circuit(build(), reference="golden.net")  # + regression oracle
+print(E.summarize(report))
+```
+
+### Diagnose a symptom
+
+```python
+from skidl_eda import diagnostics as D
+
+print(D.diagnose(["3.3V rail low", "regulator hot"]).summary())
+# [80%] Overloaded voltage regulator -> Replace regulator ... + test tree
+```
+
+`D.diagnose_design(evaluation=..., erc=...)` feeds a design's own gate output in
+as symptoms.
+
+### Regenerate skidl source from an edited schematic (HITL)
+
+After a human edits the project in KiCad (or via `kicad-sch-api`), regenerate the
+authoring source and verify it still describes the same circuit:
+
+```python
+from skidl_eda import regenerate
+
+res = regenerate("build/MyBoard/MyBoard.kicad_sch", output_dir="regen")
+print(res.summary())          # "regenerated flat: EQUIV"
+assert res.equivalent          # round-trip pin-partition equivalence passed
+```
+
+### Plan a scored PCB
+
+```python
+from skidl_eda import setup_kicad10, plan_pcb
+
+setup_kicad10()
+res = plan_pcb(build(), "build/MyBoard/MyBoard.kicad_pcb")
+print(res["score"], res["overlaps"], res["pcb_written"])
+```
+
+The PCB step is also available inline as `generate(..., pcb=True)` (opt-in,
+report-only).
+
+### Find parts and check availability
+
+```bash
+python -m skidl_eda.sourcing.find_symbol ADA4817      # search KiCad symbol libs
+```
+
+```python
+from skidl_eda.sourcing import check_availability
+check_availability("C514314")   # keyless JLCPCB lookup
+```
+
+### Bootstrap a new project
+
+```bash
+skidl-eda-bootstrap MyBoard --generate
+```
+
+Scaffolds a fresh project folder (a starter design, the design-circuit skill,
+MCP wiring, and a design log) and optionally runs the starter through
+`generate()`.
+
+## The KiCad-10 symbol-library note
+
+Do **not** set `lib_search_paths["kicad10"] = ["."] + default_lib_paths()`. When
+a process runs at or under a checkout that carries skidl's bundled
+`tests/test_data`, the resolver descends from `"."` and binds the bundled
+**KiCad-6** libraries — silently shadowing KiCad-10 symbols and hiding
+KiCad-10-only parts (for example `Amplifier_Operational:ADA4817-1ACP` simply is
+not found). Call `skidl_eda.setup_kicad10()` instead; it points at the real
+KiCad-10 symbol directory only.
+
+## Canaries
+
+`canaries/sipm_tia/` contains a SiPM transimpedance amplifier authored natively
+in skidl, with drivers that exercise the full loop end to end:
+
+```bash
+python canaries/sipm_tia/drive_phase0.py   # equivalence | sim | gates | layout
+python canaries/phase6/drive_phase6.py     # generate | edit | regenerate | PCB
+```
+
+## License
+
+MIT.
