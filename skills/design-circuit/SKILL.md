@@ -180,6 +180,24 @@ simulation, sourcing/BOM) reads it.
   must contain a `(symbol` block per component and a `(property "Reference"
   "<ref>"` for each expected reference. A ~1 KB schematic with only a text box
   means every component silently failed.
+- **Routing on a dense flat sheet.** `generate` passes `auto_stub=True` to the
+  renderer by default (stubs high-fanout/power nets to labels before routing so
+  the A* router never boxes a power pin in). Keep it on for ≥~15-part flat
+  sheets; override with `renderer_options={"auto_stub": False}` only for a small
+  sheet where you want fully-wired output. **Prefer a hierarchy over one dense
+  flat sheet** when the part count climbs — the no-`auto_stub` router still
+  struggles at ~20 parts on one sheet.
+- **`drawing_connectivity` gate** (inside `generate`, report-only): it exports a
+  netlist from the *rendered* schematic and compares it to the logical `.net`.
+  `result["steps"]["drawing_connectivity"]["equiv"]` must be `True`; `equiv=False`
+  means the drawing doesn't connect a pin the circuit does (a routing-fallback or
+  placement gap) — treat it like an ERC error and route back to Phase 3/4 (turn on
+  `auto_stub`, or split into sheets). Pass `drawing_must_match=True` to make it
+  gate `result["ok"]`.
+- **Multi-unit parts** (dual/quad op-amps with a dedicated power unit) render as
+  one shared reference `U1` with `(unit N)` — connect the power unit's `V+`/`V-`
+  pins like any pin and they place correctly. References may contain `_`/`.`
+  (`J_PWR`), so standard `R1`/`U3` naming is recommended but not required.
 
 **Error routing table:**
 | Symptom | Route |
@@ -257,7 +275,10 @@ entry point and the `Sim_*` attribute spelling differ.
   NOT use `Device:V`/`Device:I` (not real KiCad symbols). An explicit source
   overrides the net-name rail heuristic on the nets it drives; that heuristic
   matches **whole net-name tokens**, not substrings (so `VINT_*`/`VMID_*` are not
-  injected as a `VIN` supply).
+  injected as a `VIN` supply). A **negative** `value` is honored directly
+  (`value="-5"` gives −5 V) — no pin-swap trick — and an unparseable source value
+  is a loud error, not a silent 1.0. Read a source's current with
+  `result.get_current("V1")` by its plain schematic ref.
 - **Transient stimulus:** pass waveform parameters as `Part` kwargs (stored as
   extra fields). `VSIN` reads `amplitude`/`frequency`/`offset`; `VPULSE` reads
   `v1`/`v2`/`td`/`tr`/`tf`/`pw`/`per`; `VPWL` reads `points`. Keep SI suffixes
@@ -268,7 +289,9 @@ entry point and the `Sim_*` attribute spelling differ.
   `start_time`, `max_time`.
 - **Active-device models (diodes/BJTs/MOSFETs):** naming a real part in `value`
   (`value="1N4148"`, `"2N3904"`, `"SS14"`) pulls **datasheet-fit** parameters
-  when known, else a textbook-generic model; the tier is recorded in
+  when known, else a textbook-generic model; a common package/reel suffix is
+  aliased onto the die model (`value="1N4148W"`→`1N4148`, `"MMBT3904"`→`2N3904`),
+  so `value` can match the actual MPN. The tier is recorded in
   `sim.model_provenance[ref].tier` (`datasheet_fit`/`generic`/`vendor_lib`) and
   logged, so a generic is never silently passed off as the real part. **Diode
   terminals resolve by the symbol's A/K pin names, not pin order.** An unlisted
@@ -311,7 +334,9 @@ entry point and the `Sim_*` attribute spelling differ.
   so the BOM omits it. `Simulation_SPICE:*` stimulus symbols are never BOM parts.
 - On Windows the ngspice DLL bundled with KiCad is auto-configured — no separate
   ngspice install needed (loads on Python 3.13 and 3.14).
-- **Save a plot** so the log is visual: `result.save_bode_plot(...)`,
+- **Save a plot** so the log is visual: `result.save_bode_plot(path, node)`
+  (path first, then the node name, e.g.
+  `result.save_bode_plot("sim_plots/iter1_bode.png", "VOUT")`),
   `result.save_transient_plot(...)`, `result.save_dc_transfer_plot(...)` under a
   `sim_plots/` dir. They return the path, or `None` if plotting is unavailable —
   if `None`, skip the embed, don't fail the loop.

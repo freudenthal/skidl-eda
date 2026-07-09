@@ -49,6 +49,25 @@ def test_diagnose_returns_cause_and_tree():
     assert "diagnosis for" in dx.summary()
 
 
+def test_diagnose_small_signal_amp_symptom_matches():
+    """The DiffAmp E2E's exact symptom now returns a ranked analog pattern instead
+    of 'no matching pattern in the knowledge base' (B6)."""
+    dx = D.diagnose(["op-amp output stuck at zero", "differential gain measured 0"])
+    assert dx.best is not None, dx.summary()
+    assert dx.best.category == "analog"
+    assert dx.best.solutions
+    # The root cause should point at the source-emission / feedback / saturation class.
+    assert any(
+        kw in dx.best.root_cause.lower() for kw in ("dc source", "feedback", "saturat")
+    )
+
+
+def test_diagnose_cmrr_symptom_matches():
+    dx = D.diagnose(["CMRR poor", "output moves with common-mode input"])
+    assert dx.best is not None and dx.best.category == "analog"
+    assert any("match" in s.lower() for s in dx.best.solutions)
+
+
 def test_diagnose_unknown_symptoms_is_empty_not_error():
     dx = D.diagnose(["banana coloured smoke", "quantum flux"])
     assert dx.matches == [] and dx.best is None

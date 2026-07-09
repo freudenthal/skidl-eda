@@ -261,6 +261,114 @@ class DebugKnowledgeBase:
                     "leakage_current_ua": 1000,
                 },
             ),
+            # --- small-signal amplifier patterns (added after the DiffAmp E2E; B6)
+            DebugPattern(
+                pattern_id=self._generate_pattern_id(
+                    ["opamp", "output", "stuck", "zero", "gain"]
+                ),
+                category="analog",
+                symptoms=[
+                    "Op-amp output stuck at zero",
+                    "Output stuck at zero",
+                    "Differential gain measured 0",
+                    "Gain measured 0",
+                    "Gain far below design",
+                    "DC gain wrong but AC gain correct",
+                ],
+                root_cause=(
+                    "Wrong DC source polarity/value, an open feedback path, or a "
+                    "saturated stage (a DC-only error that AC linearization hides)"
+                ),
+                solutions=[
+                    "Check every DC source's sign AND magnitude actually reaches "
+                    "the node (a silent sign/value drop reads +V for -V)",
+                    "Verify the feedback network closes (in- to output through Rf)",
+                    "Confirm no stage is railed: check each op-amp output vs its "
+                    "supply rails at the DC operating point",
+                    "Compare the DC result against the AC result -- if AC is right "
+                    "and DC is wrong, suspect a source-emission or bias error",
+                ],
+                component_types=["Op-Amp", "ADA4807", "Amplifier_Operational"],
+                typical_measurements={"vout_dc": 0.0, "vout_ac_db": -14.0},
+            ),
+            DebugPattern(
+                pattern_id=self._generate_pattern_id(
+                    ["dc", "ac", "inconsistent", "gain"]
+                ),
+                category="analog",
+                symptoms=[
+                    "DC result inconsistent with AC result",
+                    "AC bandwidth correct but DC gain wrong",
+                    "Transient offset but AC transfer fine",
+                ],
+                root_cause=(
+                    "DC source sign/value emission error (the DC operating point "
+                    "uses the literal source value; AC linearizes around it)"
+                ),
+                solutions=[
+                    "Dump the SPICE netlist and read the source card's sign/value",
+                    "Test the source alone across a resistor to ground and confirm "
+                    "the node sits at the expected signed voltage",
+                    "Prefer signed values over pin-swap workarounds once the "
+                    "simulator honors them",
+                ],
+                component_types=["VDC", "IDC", "Simulation_SPICE"],
+                typical_measurements={"vnode_expected": -1.0, "vnode_measured": 1.0},
+            ),
+            DebugPattern(
+                pattern_id=self._generate_pattern_id(
+                    ["cmrr", "poor", "common", "mode", "rejection"]
+                ),
+                category="analog",
+                symptoms=[
+                    "CMRR poor",
+                    "Common-mode rejection low",
+                    "Output moves with common-mode input",
+                    "Difference amplifier not rejecting common mode",
+                ],
+                root_cause=(
+                    "Difference-network resistor mismatch or single-ended drive "
+                    "asymmetry -- CMRR is set by resistor matching"
+                ),
+                solutions=[
+                    "Match the four difference-amp resistors (0.1% or better); "
+                    "CMRR ~= 20*log10(gain / relative_mismatch)",
+                    "Drive both inputs symmetrically for the CM test",
+                    "Check the reference/ground return of the difference stage",
+                    "Verify the two input series resistors are equal",
+                ],
+                component_types=[
+                    "Op-Amp",
+                    "Instrumentation_Amplifier",
+                    "Amplifier_Operational",
+                ],
+                typical_measurements={"cmrr_db": 20.0, "resistor_mismatch_pct": 1.0},
+            ),
+            DebugPattern(
+                pattern_id=self._generate_pattern_id(
+                    ["gain", "peaking", "oscillation", "opamp", "bandwidth"]
+                ),
+                category="analog",
+                symptoms=[
+                    "Gain peaking near the corner frequency",
+                    "Amplifier oscillation",
+                    "Ringing on the step response",
+                    "AC response peaks before roll-off",
+                ],
+                root_cause=(
+                    "Finite gain-bandwidth product interacting with source/feedback "
+                    "capacitance (insufficient phase margin)"
+                ),
+                solutions=[
+                    "Add a small feedback capacitor (Cf) across Rf to compensate",
+                    "Reduce the source/input capacitance seen at the summing node",
+                    "Model the real GBW (Sim_Gbw) rather than an ideal op-amp so "
+                    "the peaking is visible in simulation",
+                    "Lower the closed-loop gain or pick a higher-GBW part",
+                ],
+                component_types=["Op-Amp", "ADA4807", "Amplifier_Operational"],
+                typical_measurements={"peaking_db": 6.0, "gbw_hz": 180e6},
+            ),
         ]
 
         for pattern in default_patterns:
