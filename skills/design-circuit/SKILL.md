@@ -90,10 +90,10 @@ simulation, sourcing/BOM) reads it.
 - Create/modify `<snake_case_name>.py`. The skidl pattern:
   - `skidl_eda.setup_kicad10()` once at the top of the build.
   - `Part("Lib", "Name", ref=..., value=..., footprint=..., **fields)` per
-    component (the cs `Component(symbol="Lib:Name", ...)` becomes
+    component (circuit-synth's `Component(symbol="Lib:Name", ...)` becomes
     `Part("Lib", "Name", ...)`).
   - `Net("NAME")` for connections; `part[pin] += net` to wire (pin numbers or
-    named pins — `u1[3] += ninv`, `u1["OUT"] += vout`; identical to cs).
+    named pins — `u1[3] += ninv`, `u1["OUT"] += vout`).
   - Power nets: create the net and set `net.drive = POWER` (import `POWER` from
     skidl) so the renderer emits proper KiCad power symbols for `GND`/`VCC*`.
   - Build inside an explicit circuit so you can hand it to the generator:
@@ -236,12 +236,12 @@ every real-part design must fix them in the Python source:
   split a dual into two singles.
 
 ## Phase 5 — SIMULATE
-The `skidl.sim` layer mirrors the cs `.simulate()` API — the SimulationResult
+The `skidl.sim` layer mirrors circuit-synth's `.simulate()` API — the SimulationResult
 helper methods are vendored verbatim, so measurement code is identical; only the
 entry point and the `Sim_*` attribute spelling differ.
 
 - **Entry point:** `from skidl.sim import simulate` then `sim =
-  simulate(circuit)`. (cs's `circuit.simulate()` → `simulate(circuit)`.)
+  simulate(circuit)`. (circuit-synth's `circuit.simulate()` → `simulate(circuit)`.)
 - **DC / operating point:** `result = sim.operating_point()`, read values with
   `result.get_voltage("NET_NAME")` (ngspice node lookup is case-insensitive).
 - **AC / frequency response:** drive the input with a `Part("Simulation_SPICE",
@@ -364,7 +364,7 @@ invisible to those steps and are **overwritten the next time you regenerate**.
    added/removed parts, net connections, `Sim_*` kwargs, MPN/Manufacturer
    kwargs. Follow the same `Part`/`Net` patterns as the rest of the file.
 3. **Regenerate.** Re-run the file: `PYTHONUTF8=1 uv run python <name>.py`.
-   **Note — skidl regenerates the schematic from scratch each run** (unlike cs's
+   **Note — skidl regenerates the schematic from scratch each run** (unlike a
    placement-preserving update mode). A plain regenerate does **not** keep manual
    KiCad placement. If the user has hand-placed/edited the schematic in KiCad and
    wants those edits preserved across a source change, that is the

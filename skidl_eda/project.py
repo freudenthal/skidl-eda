@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Orchestration entry -- ``skidl_eda.project.generate`` (Phase 2).
+"""Orchestration entry -- ``skidl_eda.project.generate``.
 
 The ``generate_kicad_project`` equivalent for the skidl stack: take a built
 skidl :class:`~skidl.Circuit`, render it with the **fork's KiCad-10 renderer**,
@@ -16,8 +16,8 @@ The caller is responsible for binding KiCad-10 libraries
 (:func:`skidl_eda.setup_kicad10`) and building the circuit BEFORE calling
 :func:`generate`; this function only renders + gates an already-built circuit.
 
-The ERC **PWR_FLAG autofix** is not wired in yet (its own scoped port, still
-pending in Phase 1); ERC runs read-only here and reports errors/warnings.
+ERC runs by default with the net-aware **PWR_FLAG autofix** (``erc_autofix``);
+it is report-only unless the caller sets ``erc_must_be_clean``.
 """
 
 from __future__ import annotations

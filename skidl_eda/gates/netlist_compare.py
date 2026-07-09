@@ -1,4 +1,4 @@
-"""Compare two KiCad netlists for electrical equivalence (Stage 13, Phase C).
+"""Compare two KiCad netlists for electrical equivalence.
 
 The SKiDL render and the circuit_synth generator produce *different-looking*
 ``.kicad_sch`` files (different placement, different auto-generated net names) but

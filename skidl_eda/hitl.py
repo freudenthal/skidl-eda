@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""HITL regeneration (Phase 6): edited KiCad schematic -> regenerated skidl source.
+"""HITL regeneration: edited KiCad schematic -> regenerated skidl source.
 
 This is the *reverse* direction of :mod:`skidl_eda.project` (which renders skidl
 -> KiCad). It wires **skidl-codegen** into the loop so the human-in-the-loop edit
@@ -16,7 +16,7 @@ path closes:
         + round-trip equivalence gate: does the regenerated source describe the
           SAME circuit as the edited schematic?
 
-Design principle (from the plan): **code stays source-of-truth; regeneration
+Design principle: **code stays source-of-truth; regeneration
 REPLACES incremental source-merge/sync.** After a human edit, we do not try to
 patch the original skidl source — we regenerate it wholesale from the edited
 schematic and prove electrical equivalence with the pin-partition round-trip

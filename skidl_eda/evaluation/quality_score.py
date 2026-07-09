@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
 """Deterministic structural quality checks -> a weighted 0-100 grade.
 
-The aggregate, regression-trackable metric circuit-synth never had. Each check
-is a pure function of a :class:`~skidl_eda.evaluation.spec.CircuitSpec` returning
-a 0-1 score plus human-readable issues; :func:`quality_score` folds them into a
-weighted grade. Modelled on lachlan's ``quality_score`` design (power
-connectivity, decoupling coverage, floating inputs) -- reconstructed natively,
-as those files live in his private hosted engine, not the public repo.
+Each check is a pure function of a
+:class:`~skidl_eda.evaluation.spec.CircuitSpec` returning a 0-1 score plus
+human-readable issues; :func:`quality_score` folds them into a weighted grade.
+Modelled on the quality-scoring approach in Lachlan Fysh's SKiDL work (power
+connectivity, decoupling coverage, floating inputs).
 """
 
 from __future__ import annotations

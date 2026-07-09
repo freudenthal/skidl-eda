@@ -4,8 +4,8 @@
 Compares two circuits at the connectivity level, independent of the DSL that
 authored them: a skidl ``Circuit`` (via ``skidl.sim.skidl_flat_view``) and a
 circuit-synth ``Circuit`` (via its ``.nets``/``.components``) reduce to the same
-canonical form so "the skidl re-authoring describes the same circuit as the cs
-twin" is a decidable check, not an eyeball.
+canonical form so "the skidl re-authoring describes the same circuit as the
+circuit-synth twin" is a decidable check, not an eyeball.
 
 Canonical form of a circuit::
 

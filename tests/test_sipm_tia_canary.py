@@ -53,7 +53,7 @@ def test_skidl_tia_matches_cs_twin():
     try:
         import circuit_synth  # noqa: F401
     except Exception:  # noqa: BLE001
-        pytest.skip("circuit_synth (cs twin) not importable in this env")
+        pytest.skip("circuit_synth (the reference twin) not importable in this env")
 
     _need_kicad10()
     import sipm_tia as cs_mod

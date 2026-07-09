@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Gated PCB step (Phase 6): plan a placement and emit a scored ``.kicad_pcb``.
+"""Gated PCB step: plan a placement and emit a scored ``.kicad_pcb``.
 
 Thin loop-facing facade over the **skidl-layout** peer package. Given a built
 skidl ``Circuit`` (the same loop-boundary object :mod:`skidl_eda.project` renders

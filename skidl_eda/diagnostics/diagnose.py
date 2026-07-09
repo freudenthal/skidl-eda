@@ -14,7 +14,7 @@ in:
   on rail", "power pin not driven") maps to a probable cause + fix without the
   human re-typing it. This is the "re-point the analyzer at the skidl netlist
   boundary" step -- the boundary here is the parsed-netlist-derived eval report,
-  not a cs ``Circuit``.
+  not a circuit-synth ``Circuit``.
 """
 
 from __future__ import annotations
@@ -86,8 +86,8 @@ def diagnose(
 ) -> Diagnosis:
     """Look up ``symptoms`` in the knowledge base; return ranked matches + a tree.
 
-    ``min_similarity`` is lower than the cs default (0.3) because generation-time
-    symptom phrases are terse; callers wanting only strong matches can raise it.
+    ``min_similarity`` is deliberately low (0.3) because generation-time symptom
+    phrases are terse; callers wanting only strong matches can raise it.
     """
     own_kb = kb is None
     kb = kb or DebugKnowledgeBase()

@@ -1,12 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Automated design-quality evaluation for the skidl-eda loop (Phase 4).
+"""Automated design-quality evaluation for the skidl-eda loop.
 
-The aggregate, regression-trackable quality metric circuit-synth never had,
-reconstructed natively from lachlan's documented eval-harness design (his
-``reference_oracle``/``circuit_judge``/``quality_score`` live in a private hosted
-engine, not the public repo, so this is a from-spec rebuild, not a verbatim
-vendor). All checks anchor on a KiCad netlist (ground truth) and reuse the shared
-``netlist_compare`` + kicad-cli gates.
+An aggregate, regression-trackable quality metric, modelled on the eval-harness
+approach in Lachlan Fysh's SKiDL work (reference oracle / structural judge /
+weighted score). All checks anchor on a KiCad netlist (ground truth) and reuse
+the shared ``netlist_compare`` + kicad-cli gates.
 
 - :class:`CircuitSpec` -- the ``Circuit → spec`` adapter (structural view).
 - :func:`quality_score` -- weighted structural grade (power connectivity,

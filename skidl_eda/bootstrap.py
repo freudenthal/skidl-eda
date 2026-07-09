@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """Fresh-folder project bootstrap for the skidl-eda design loop.
 
-The skidl-eda equivalent of circuit-synth's ``cs-bootstrap`` / ``cs-new-project``:
-turn an empty folder into a ready-to-design project. Scaffolds
+Turn an empty folder into a ready-to-design skidl-eda project. Scaffolds
 
     <base>/<name>/
       <name_snake>.py        # a runnable starter (skidl -> skidl_eda.generate)
@@ -11,11 +10,10 @@ turn an empty folder into a ready-to-design project. Scaffolds
       .claude/skills/design-circuit/SKILL.md   # the skidl-authoring design loop
       README.md
 
-Unlike cs-bootstrap this does **no** ``uv init`` / ``uv add`` by default: the
-skidl-eda stack (skidl fork, skidl-layout, kicad-sch-api fork, skidl-eda) is
-LOCAL/unpublished, so a fresh ``uv add skidl-eda`` from PyPI would fail. The
-scaffolded project is meant to run against the **same interpreter** that has
-skidl-eda installed (the dev venv). ``--generate`` runs the starter with that
+This does **no** ``uv init`` / ``uv add`` by default: the skidl-eda stack is
+installed from source (not yet on PyPI), so a fresh ``uv add skidl-eda`` would
+fail. The scaffolded project is meant to run against the **same interpreter**
+that has skidl-eda installed. ``--generate`` runs the starter with that
 interpreter to prove the project is real; the scaffold itself is pure file I/O
 (offline, no uv), so it is fully testable without a network or KiCad.
 """

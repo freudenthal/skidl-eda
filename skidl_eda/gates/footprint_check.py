@@ -8,7 +8,7 @@ that generation happily accepts but that only surface as
 
 Footprint libraries live in ``<share>/kicad/footprints/<Lib>.pretty/<Name>.kicad_mod``,
 a sibling of the ``symbols`` dir. Ported from circuit-synth
-``kicad/sch_gen/footprint_check.py``; the one cs coupling (``SymbolLibCache``)
+``kicad/sch_gen/footprint_check.py``; the one circuit-synth coupling (``SymbolLibCache``)
 is replaced by :mod:`skidl_eda.env`'s real-KiCad-10 symbol-dir discovery so the
 footprint roots are derived without importing circuit_synth.
 """
@@ -82,7 +82,7 @@ def check_footprints(components: Iterable, roots: Optional[List[Path]] = None) -
 
     Args:
         components: iterable of objects with ``.ref``/``.reference`` and
-            ``.footprint`` (both skidl ``Part`` and cs ``Component`` satisfy this).
+            ``.footprint`` (both skidl ``Part`` and circuit-synth ``Component`` satisfy this).
         roots: footprint root dirs; defaults to the discovered KiCad roots. An
             empty list means "skip silently".
 

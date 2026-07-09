@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """``CircuitSpec`` -- the structural view the eval harness scores against.
 
-The ``Circuit → spec`` adapter the plan calls out as "new work". A spec is a
-DSL-agnostic, connectivity-level summary of a design derived from a **parsed
-KiCad netlist** (KiCad ground truth via ``kicad-cli sch export netlist``), so the
-same checks score a skidl-authored circuit, a cs one, or a hand-drawn schematic.
+The ``Circuit → spec`` adapter. A spec is a DSL-agnostic, connectivity-level
+summary of a design derived from a **parsed KiCad netlist** (KiCad ground truth
+via ``kicad-cli sch export netlist``), so the same checks score a skidl-authored
+circuit, a circuit-synth one, or a hand-drawn schematic.
 
     components: {ref: {"value": .., "footprint": ..}}   # incl. #-pseudo symbols
     nets:       {net_name: {(ref, pin), ...}}           # incl. #PWR/#FLG pins

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Diagnostics -- symptom -> probable cause -> suggested test (Phase 5).
+"""Diagnostics -- symptom -> probable cause -> suggested test.
 
 The circuit-synth ``debugging/`` knowledge base salvaged as a skidl-eda module.
 The content is DSL-agnostic (failure patterns, symptom/measurement analysis,

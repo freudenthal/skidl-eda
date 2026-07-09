@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 """KiCad-10 environment setup for skidl-authored designs.
 
-Phase-0 finding (the reason this module exists): the recipe used in skidl's own
-sim-adapter test --
+The reason this module exists: the recipe used in skidl's own sim-adapter test --
 
     set_default_tool(KICAD10)
     lib_search_paths["kicad10"] = ["."] + default_lib_paths()
 
 -- is a trap when the process runs anywhere at/under a checkout that carries
-skidl's ``tests/test_data`` (e.g. the circ-synth workspace root). skidl's file
+skidl's ``tests/test_data`` (e.g. a monorepo/workspace checkout root). skidl's file
 resolver descends from ``"."`` and finds the bundled **KiCad-6** vintage
 libraries (``tests/test_data/kicad6/*.kicad_sym``) *before* the real
 ``C:\\Program Files\\KiCad\\10.0\\share\\kicad\\symbols``. Parts that exist in

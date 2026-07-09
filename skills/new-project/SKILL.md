@@ -20,11 +20,10 @@ the folder, scaffolds a runnable starter (skidl → `skidl_eda.generate`), the
   (scaffold only). If the user described a specific circuit, scaffold the default
   here, then design theirs in the handoff step.
 
-## Environment note (LOCAL/unpublished stack)
-The skidl-eda stack (skidl fork, skidl-layout, kicad-sch-api fork, skidl-eda) is
-**local/unpublished**, so — unlike circuit-synth's `cs-bootstrap` — this bootstrap
+## Environment note (installed-from-source stack)
+The skidl-eda stack is installed from source (not yet on PyPI), so this bootstrap
 does **no** `uv init` / `uv add`. The scaffolded project runs against the **same
-interpreter that has skidl-eda installed** (the dev venv). The scaffold step is
+interpreter that has skidl-eda installed**. The scaffold step is
 offline (pure file I/O); `--generate` runs the starter with that interpreter.
 
 ## Run it

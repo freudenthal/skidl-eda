@@ -1,12 +1,9 @@
 # -*- coding: utf-8 -*-
 """SiPM transimpedance amplifier -- authored NATIVELY in skidl (Phase-0 canary).
 
-Faithful skidl re-authoring of the circuit-synth twin at
-``kicadprojects/SiPM_TIA/circuit-synth/sipm_tia.py`` -- same parts, values,
-footprints, nets, pin map, and simulation intent. The netlist-equivalence check
-(``equivalence.py``) proves the two describe the same circuit; the whole point
-of Phase 0 is to drive THIS through sim + gates + layout by hand and compare
-ergonomics against the cs original.
+A single-stage inverting shunt-feedback TIA authored natively in skidl, used as
+a worked example that drives the whole loop -- sim + gates + layout +
+netlist-equivalence -- end to end.
 
 Topology: single-stage inverting shunt-feedback TIA around a FET-input
 ADA4817-1. Rf=100k -> 100 kOhm transimpedance; Cf=1.5p -> ~1.06 MHz pole.
@@ -14,7 +11,7 @@ SiPM small-signal model = photocurrent source + C_term=1.04 nF on the summing
 node. The real MICROFJ-60035 sensor is placed (Sim_Enable="0") for the
 deliverable schematic but excluded from SPICE.
 
-cs DSL -> skidl authoring notes:
+circuit-synth DSL -> skidl authoring notes:
   * ``Component(symbol="Lib:Name", ref=.., value=.., footprint=.., **fields)``
       -> ``Part("Lib", "Name", ref=.., value=.., footprint=.., **fields)``
   * ``Sim.Gbw`` / ``Sim.Enable`` (dotted) -> ``Sim_Gbw`` / ``Sim_Enable``
@@ -26,7 +23,7 @@ from __future__ import annotations
 
 from skidl import Circuit, Net, Part
 
-# --- design values (identical to the cs twin) --------------------------------
+# --- design values -----------------------------------------------------------
 RF = "100k"        # transimpedance-setting feedback resistor
 CF = "1.5pF"       # feedback / compensation cap (C0G) -> ~1.06 MHz pole
 C_TERM = "1.04nF"  # MICROFJ-60035 anode terminal capacitance (datasheet)

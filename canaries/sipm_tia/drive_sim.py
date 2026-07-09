@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Phase-0 sim harness for the skidl-authored SiPM TIA.
+"""Simulation harness for the skidl-authored SiPM TIA.
 
-Faithful port of ``kicadprojects/SiPM_TIA/circuit-synth/simulate_sipm_tia.py``
-to the ``skidl.sim`` seam. Same acceptance criteria C2-C9, same sweeps. The cs
-harness used ``circuit.simulate().ac_analysis(...)``; the skidl one uses
+Drives the ``skidl.sim`` seam through acceptance criteria C2-C9. The
+circuit-synth harness used ``circuit.simulate().ac_analysis(...)``; the skidl one uses
 ``skidl.sim.simulate(circuit).ac_analysis(...)`` -- the SimulationResult helper
 API is vendored verbatim, so the measurement code is unchanged.
 
