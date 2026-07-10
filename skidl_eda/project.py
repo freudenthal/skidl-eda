@@ -233,7 +233,16 @@ def generate(
     # clean on this path, fall back with renderer_options={"auto_stub": True} (stubs
     # power/high-fanout nets to labels before routing -- the clean path for dense
     # flat sheets). Everything here is overridable via renderer_options.
-    render_opts = {"seed_placement": True, "auto_stub": False}
+    render_opts = {
+        "seed_placement": True,
+        "auto_stub": False,
+        # True KiCad hierarchical interconnect (child hierarchical_label on the
+        # net + wired parent sheet pins) and power symbols pulled off the pin onto
+        # short stub wires -- the cleanest, most readable pass (ERC 0,
+        # drawing_connectivity matches). Both overridable via renderer_options.
+        "hierarchical_sheet_pins": True,
+        "power_stubs": True,
+    }
     render_opts.update(renderer_options or {})
     try:
         circuit.generate_schematic(

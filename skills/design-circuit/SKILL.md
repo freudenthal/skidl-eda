@@ -182,8 +182,10 @@ simulation, sourcing/BOM) reads it.
   means every component silently failed.
 - **Default render path = hierarchy + constructive placement + A\* wiring.**
   `generate` defaults to `renderer_options={"seed_placement": True,
-  "auto_stub": False}` — constructive seed placement followed by A\* routing that
-  draws **real wires** (not label stubs). **Author the design hierarchically**
+  "auto_stub": False, "hierarchical_sheet_pins": True, "power_stubs": True}` —
+  constructive seed placement followed by A\* routing that draws **real wires**
+  (not label stubs), the true KiCad hierarchical interconnect, and power symbols
+  pulled off the pin onto short stub wires. **Author the design hierarchically**
   (`@subcircuit`, ~5–15 parts/sheet) so each sheet stays routable; this is the
   path a new build should try **first**. Verify it with the `drawing_connectivity`
   gate below. The render is now **byte-reproducible** (fixed default seed; run it
@@ -201,18 +203,17 @@ simulation, sourcing/BOM) reads it.
   - **Split routed nets self-heal.** If the router boxes a pin in, a net-aware
     emission audit drops a unifying name label so the drawing still matches the
     netlist.
-  - **True KiCad hierarchical sheet pins — opt-in.** Pass
-    `renderer_options={"hierarchical_sheet_pins": True}` to emit the real KiCad
-    hierarchical interconnect instead of cross-sheet global labels: each boundary
-    net gets a `hierarchical_label` **on the net** inside the child sheet, paired
-    with a **sheet pin** (wired out to a same-named label) on the parent's sheet
-    symbol; a transit net threads through part-less intermediate sheets. It is
-    ERC-clean and byte-reproducible on the SiPM 8-sheet bench
-    (`drawing_connectivity` matches the netlist, grade unchanged). Prefer it when
-    you want a schematic that reads as a proper KiCad hierarchy (sheet pins on the
-    boxes) rather than name-matched global labels. **The default stays global
-    labels** (simpler, equally ERC-clean) — the choice is a readability
-    preference, not a correctness one.
+  - **True KiCad hierarchical sheet pins (default ON, `hierarchical_sheet_pins`).**
+    Each boundary net gets a `hierarchical_label` **on the net** inside the child
+    sheet, paired with a **sheet pin** (wired out to a same-named label) on the
+    parent's sheet symbol; a transit net threads through part-less intermediate
+    sheets. ERC-clean and byte-reproducible on the SiPM 8-sheet bench
+    (`drawing_connectivity` matches). Set `renderer_options={"hierarchical_sheet_pins":
+    False}` to fall back to plain cross-sheet `global_label`s.
+  - **Power symbols on stub wires (default ON, `power_stubs`).** Each power
+    symbol is pulled one grid step off its pin onto a short stub wire (the
+    classic KiCad look, symbols clear of the body). Set `renderer_options=
+    {"power_stubs": False}` to place symbols directly on the pin instead.
 - **Fall back to `auto_stub` only if a dense sheet still won't clear.** At very
   high per-sheet density the A\* router may still fail; if ERC won't clear or
   `drawing_connectivity` reports `equiv=False`, pass
