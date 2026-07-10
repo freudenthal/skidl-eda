@@ -201,6 +201,18 @@ simulation, sourcing/BOM) reads it.
   - **Split routed nets self-heal.** If the router boxes a pin in, a net-aware
     emission audit drops a unifying name label so the drawing still matches the
     netlist.
+  - **True KiCad hierarchical sheet pins — opt-in.** Pass
+    `renderer_options={"hierarchical_sheet_pins": True}` to emit the real KiCad
+    hierarchical interconnect instead of cross-sheet global labels: each boundary
+    net gets a `hierarchical_label` **on the net** inside the child sheet, paired
+    with a **sheet pin** (wired out to a same-named label) on the parent's sheet
+    symbol; a transit net threads through part-less intermediate sheets. It is
+    ERC-clean and byte-reproducible on the SiPM 8-sheet bench
+    (`drawing_connectivity` matches the netlist, grade unchanged). Prefer it when
+    you want a schematic that reads as a proper KiCad hierarchy (sheet pins on the
+    boxes) rather than name-matched global labels. **The default stays global
+    labels** (simpler, equally ERC-clean) — the choice is a readability
+    preference, not a correctness one.
 - **Fall back to `auto_stub` only if a dense sheet still won't clear.** At very
   high per-sheet density the A\* router may still fail; if ERC won't clear or
   `drawing_connectivity` reports `equiv=False`, pass
