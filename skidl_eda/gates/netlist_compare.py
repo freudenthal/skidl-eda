@@ -123,7 +123,14 @@ class ParsedNetlist:
     named_nets: Dict[str, Set[Pin]] = field(default_factory=dict)
 
     def partition(self, ignore_pseudo: bool = True) -> Set[FrozenSet[Pin]]:
-        """The set of pin-groups (empty groups dropped)."""
+        """The set of pin-groups carrying connectivity (``< 2`` pins dropped).
+
+        A single-pin group carries no connectivity information: ``kicad-cli sch
+        export netlist`` emits a one-pin ``unconnected-(U1-Pad6)`` net for every
+        placed-but-unwired pin, while SKiDL's logical ``.net`` omits them. Keeping
+        such groups made a clean render report as DIVERGES. skidl-codegen's own
+        equivalence gate drops single-pin no-connects the same way.
+        """
         groups: Set[FrozenSet[Pin]] = set()
         for net in self.nets:
             pins = {
@@ -131,7 +138,7 @@ class ParsedNetlist:
                 for (ref, pin) in net
                 if not (ignore_pseudo and ref.startswith("#"))
             }
-            if pins:
+            if len(pins) >= 2:
                 groups.add(frozenset(pins))
         return groups
 

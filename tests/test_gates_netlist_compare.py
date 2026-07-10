@@ -48,3 +48,35 @@ def test_rewire_is_not_equivalent(tmp_path):
     cmp = compare_netlists(a, c)
     assert bool(cmp) is False
     assert cmp.messages
+
+
+# B has an extra single-pin "unconnected-(U1-Pad6)" net (a placed-but-unwired pin
+# that kicad-cli always emits); A omits it. Dropping single-pin groups keeps them
+# equivalent -- a single pin carries no connectivity.
+_NET_D = _NET_A.replace(
+    '(net (code "3") (name "GND") (node (ref "R2") (pin "2")))))',
+    '(net (code "3") (name "GND") (node (ref "R2") (pin "2")))\n'
+    '    (net (code "4") (name "unconnected-(U1-Pad6)") (node (ref "U1") (pin "6")))))',
+)
+
+
+def test_single_pin_no_connect_is_ignored(tmp_path):
+    a = _write(tmp_path, "a.net", _NET_A)
+    d = _write(tmp_path, "d.net", _NET_D)
+    cmp = compare_netlists(a, d)
+    assert bool(cmp) is True, cmp.messages
+
+
+def test_genuine_two_pin_difference_still_fails(tmp_path):
+    # A two-pin extra net IS a real connectivity difference -> not equivalent.
+    net_e = _NET_A.replace(
+        '(net (code "3") (name "GND") (node (ref "R2") (pin "2")))))',
+        '(net (code "3") (name "GND") (node (ref "R2") (pin "2")))\n'
+        '    (net (code "4") (name "X") (node (ref "R1") (pin "3")) '
+        '(node (ref "R2") (pin "3")))))',
+    )
+    a = _write(tmp_path, "a.net", _NET_A)
+    e = _write(tmp_path, "e.net", net_e)
+    cmp = compare_netlists(a, e)
+    assert bool(cmp) is False
+    assert cmp.messages
