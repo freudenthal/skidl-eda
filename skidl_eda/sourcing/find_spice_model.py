@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Find SPICE models in the KiCad-Spice-Library corpus, by name substring.
+
+Prints, for each match, a paste-ready block the LLM (or a human) can drop into a
+skidl ``Part``: the model name, defining file, license tier, and the exact
+``Sim_*`` kwargs -- including the recovered subckt node order so subckt pins are
+never misordered.
+
+    uv run python -m skidl_eda.sourcing.find_spice_model TL072 --type opamp
+    uv run python -m skidl_eda.sourcing.find_spice_model 1N4148 --verify
+    uv run python -m skidl_eda.sourcing.find_spice_model BC546B --into-store BC546B
+
+Exit 0 = matches found, 2 = none, 3 = corpus not available.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+# --type alias -> (kind filter, device-type filter list). None kind = any.
+_TYPE_ALIASES = {
+    "diode": (None, ["D"]),
+    "led": (None, ["D"]),
+    "zener": (None, ["D"]),
+    "bjt": (None, ["NPN", "PNP"]),
+    "npn": (None, ["NPN"]),
+    "pnp": (None, ["PNP"]),
+    "mosfet": (None, ["NMOS", "PMOS", "VDMOS"]),
+    "nmos": (None, ["NMOS", "VDMOS"]),
+    "pmos": (None, ["PMOS"]),
+    "jfet": (None, ["NJF", "PJF"]),
+    "opamp": ("subckt", None),
+    "subckt": ("subckt", None),
+    "model": ("model", None),
+}
+
+# 5-node subckt: near-universal PSpice op-amp node order.
+_OPAMP5_ROLES = ["+in", "-in", "V+", "V-", "out"]
+
+
+def _role_line(hit) -> str:
+    if hit.kind != "subckt" or not hit.nodes:
+        return ""
+    if len(hit.nodes) == 5:
+        pairs = ", ".join(f"{n}={r}" for n, r in zip(hit.nodes, _OPAMP5_ROLES))
+        return f"  # subckt nodes (assumed op-amp order): {pairs}"
+    return f"  # subckt nodes (order matters): {' '.join(hit.nodes)}"
+
+
+def _sim_pins_template(hit) -> str:
+    """A Sim_Pins template mapping SYMBOL pins -> subckt nodes (user fills the
+    symbol pin numbers). Only meaningful for subckts."""
+    if hit.kind != "subckt" or not hit.nodes:
+        return ""
+    if len(hit.nodes) == 5:
+        parts = " ".join(f"<pin_{r}>={n}" for n, r in zip(hit.nodes, _OPAMP5_ROLES))
+    else:
+        parts = " ".join(f"<pin{i+1}>={n}" for i, n in enumerate(hit.nodes))
+    return f'  Sim_Pins="{parts}"'
+
+
+def _print_hit(hit, models_dir, license_tier, verify=None):
+    rel = hit.path
+    try:
+        rel = os.path.relpath(hit.path, models_dir)
+    except ValueError:
+        pass
+    kinddt = hit.kind + (f", {hit.device_type}" if hit.device_type else "")
+    print(f"{hit.name}  ({kinddt})  {rel}   license: {license_tier}")
+    # Primary path: name-in-value auto-resolves via the index (needs
+    # SKIDL_SPICE_LIB_PATH set). For subckts, auto-resolve also needs Sim_Pins.
+    if hit.kind == "model":
+        print(f'  value="{hit.name}"   Sim_Compat="psa"'
+              "   # auto-resolves via the library index")
+    else:
+        print(f'  value="{hit.name}"   Sim_Compat="psa"')
+        print(_sim_pins_template(hit))
+    # Explicit alternative (always works, no env var needed):
+    print(f'  # explicit: Sim_Library="{os.path.abspath(hit.path)}" '
+          f'Sim_Name="{hit.name}"')
+    rl = _role_line(hit)
+    if rl:
+        print(rl)
+    if hit.header:
+        first = [ln for ln in hit.header.splitlines() if ln.strip("* ").strip()][:5]
+        for ln in first:
+            print(f"  # {ln.strip()}")
+    if verify is not None:
+        v = verify
+        status = "LOADS" if v.loaded else "FAILS-TO-LOAD"
+        conv = " + converges" if v.converged else (" (no .op convergence)" if v.loaded else "")
+        extra = f"  [{v.error}]" if v.error and not v.loaded else ""
+        print(f"  verify: {status}{conv}{extra}")
+    print()
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        description="Find SPICE models in the KiCad-Spice-Library corpus.")
+    ap.add_argument("query", help="case-insensitive name substring, e.g. TL072")
+    ap.add_argument("--type", dest="type_", choices=sorted(_TYPE_ALIASES),
+                    help="restrict by device type / kind")
+    ap.add_argument("--limit", type=int, default=20, help="max results (default 20)")
+    ap.add_argument("--verify", action="store_true",
+                    help="smoke-test each shown model against ngspice")
+    ap.add_argument("--into-store", metavar="MPN",
+                    help="copy the top permissive hit into the model store as MPN "
+                         "(so value=MPN resolves with no env var)")
+    ap.add_argument("--allow-restricted", action="store_true",
+                    help="allow --into-store to copy a vendor-restricted file")
+    ap.add_argument("--path", help="explicit corpus path (repo root or Models dir)")
+    ap.add_argument("--rebuild", action="store_true",
+                    help="force a full re-index of the corpus")
+    args = ap.parse_args(argv)
+
+    from skidl_eda.sourcing import spice_library as SL
+
+    models_dir = SL.ensure_library(args.path)
+    if models_dir is None:
+        return 3
+    index = SL.build_catalog(models_dir, rebuild=args.rebuild)
+    if index is None:
+        return 3
+
+    kind = dts = None
+    if args.type_:
+        kind, dts = _TYPE_ALIASES[args.type_]
+    hits = index.search(args.query, kind=kind, device_types=dts, limit=args.limit)
+    if not hits:
+        print(f"# no models matching {args.query!r}"
+              + (f" (type={args.type_})" if args.type_ else ""), file=sys.stderr)
+        return 2
+
+    for hit in hits:
+        lic = SL.classify_license(hit.path, models_dir)
+        verify = SL.smoke_test(hit.name, models_dir) if args.verify else None
+        _print_hit(hit, models_dir, lic, verify)
+
+    if args.into_store:
+        top = hits[0]
+        lic = SL.classify_license(top.path, models_dir)
+        if lic != SL.LICENSE_PERMISSIVE and not args.allow_restricted:
+            print(f"# refusing to copy {top.name} into the store: license "
+                  f"'{lic}' (re-run with --allow-restricted to override; local "
+                  f"simulation via Sim_Library works regardless)", file=sys.stderr)
+            return 0
+        try:
+            from skidl.sim.model_store import get_model_store
+
+            dest = get_model_store().add_model(
+                args.into_store, top.path, source="KiCad-Spice-Library",
+                model_name=top.name, license=lic)
+            print(f"# copied {top.name} -> {dest} (store key '{args.into_store}')",
+                  file=sys.stderr)
+        except Exception as exc:
+            print(f"# could not copy into store: {exc}", file=sys.stderr)
+
+    print(f"# {len(hits)} match(es) in {models_dir}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -304,6 +304,12 @@ def smoke_test(name: str, models_dir: Optional[str] = None,
     netlist = _testbench(hit)
     res = SmokeResult(name, False, False, kind=hit.kind,
                       device_type=hit.device_type, path=hit.path)
+    # Quiet ngspice's parse warnings/errors -- the SmokeResult summarizes outcome.
+    import logging as _lg
+
+    ng_log = _lg.getLogger("PySpice.Spice.NgSpice.Shared.NgSpiceShared")
+    prev_level = ng_log.level
+    ng_log.setLevel(_lg.CRITICAL)
     try:
         shared.load_circuit(netlist)
         res.loaded = True
@@ -315,4 +321,6 @@ def smoke_test(name: str, models_dir: Optional[str] = None,
             shared.exec_command("reset")
         except Exception:  # pragma: no cover
             pass
+    finally:
+        ng_log.setLevel(prev_level)
     return res
