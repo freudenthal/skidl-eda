@@ -78,6 +78,12 @@ def _print_hit(hit, models_dir, license_tier, verify=None):
     else:
         print(f'  value="{hit.name}"   Sim_Compat="psa"')
         print(_sim_pins_template(hit))
+        # The Sim_Pins block is NOT paste-ready: the left-hand <pinN> tokens are
+        # placeholders for YOUR symbol's pins (E2E finding M2).
+        print("  # ^ Sim_Pins maps YOUR symbol's pins to these subckt nodes: "
+              "replace each")
+        print("  #   <pinN> with your KiCad symbol's pin NUMBER; keep the node")
+        print("  #   values (right of '=') verbatim.")
     # Explicit alternative (always works, no env var needed):
     print(f'  # explicit: Sim_Library="{os.path.abspath(hit.path)}" '
           f'Sim_Name="{hit.name}"')
@@ -118,6 +124,10 @@ def main(argv=None) -> int:
 
     from skidl_eda.sourcing import spice_library as SL
 
+    # Capture whether the user has the env var set *before* build_catalog aligns
+    # it in-process (that setdefault only affects this CLI, not the user's next
+    # simulation) -- so the M5 hint reflects the user's persistent state.
+    lib_env_was_set = bool(os.environ.get("SKIDL_SPICE_LIB_PATH"))
     models_dir = SL.ensure_library(args.path)
     if models_dir is None:
         return 3
@@ -159,6 +169,15 @@ def main(argv=None) -> int:
             print(f"# could not copy into store: {exc}", file=sys.stderr)
 
     print(f"# {len(hits)} match(es) in {models_dir}", file=sys.stderr)
+    # M5: if the corpus is present but SKIDL_SPICE_LIB_PATH is unset, a bare
+    # value="<NAME>" will NOT auto-resolve in the user's next simulation.
+    if not lib_env_was_set:
+        print(
+            f"note: SKIDL_SPICE_LIB_PATH is unset - value=\"<NAME>\" auto-resolve "
+            f"will NOT fire in simulations; set it to {models_dir} or use the "
+            f"explicit Sim_Library= line above.",
+            file=sys.stderr,
+        )
     return 0
 
 
