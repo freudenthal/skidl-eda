@@ -101,6 +101,12 @@ simulation, sourcing/BOM) reads it.
   - `Part("Lib", "Name", ref=..., value=..., footprint=..., **fields)` per
     component (circuit-synth's `Component(symbol="Lib:Name", ...)` becomes
     `Part("Lib", "Name", ...)`).
+  - Prefer human-readable **value strings** (`value="22u"`, `"100n"`, `"10k"`)
+    over floats/`str(float)` — a bare float renders as `2.2e-05` in the
+    BOM/schematic. (The renderer now engineering-formats bare floats as a
+    backstop, but an exact string is always shown verbatim.) Give refs a
+    trailing number (`ref="CO1"` not `"CO"`); an unnumbered ref reads as
+    unannotated (`CO?`) in KiCad, so the renderer finalizes it to `CO1` itself.
   - `Net("NAME")` for connections; `part[pin] += net` to wire (pin numbers or
     named pins — `u1[3] += ninv`, `u1["OUT"] += vout`).
   - Power nets: create the net and set `net.drive = POWER` (import `POWER` from
