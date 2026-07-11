@@ -58,11 +58,15 @@ FP_D = "Diode_SMD:D_SMA"
 FP_R = "Resistor_SMD:R_1206_3216Metric"
 
 
-def _build_llc(ckt: Circuit, fsw: float) -> None:
-    """Populate ``ckt`` (already active) with the LLC at switching freq ``fsw``."""
+def _build_llc(ckt: Circuit, fsw: float, dt: float = 100e-9) -> None:
+    """Populate ``ckt`` (already active) with the LLC at switching freq ``fsw``.
+
+    ``dt`` is the half-bridge deadtime (default 100 ns); size it for ZVS on the
+    device-level twin -- see llc_devicelevel.py.
+    """
     u1 = Part(
         HB_LIB, HB_PART, ref="U1", value="HALFBRIDGE",
-        Sim_Device="HALFBRIDGE", Sim_Params=f"fsw={fsw:.7g} dt=100n ron=0.1",
+        Sim_Device="HALFBRIDGE", Sim_Params=f"fsw={fsw:.7g} dt={dt:.6g} ron=0.1",
         Note="half-bridge switch stage (sim stand-in; real board = 2x MOSFET + driver)",
     )
     v1 = Part("Simulation_SPICE", "VDC", ref="V1", value=VIN,
@@ -106,9 +110,9 @@ def _build_llc(ckt: Circuit, fsw: float) -> None:
     gnd += co[2], rl[2]
 
 
-def llc_resonant(fsw: float = FR) -> Circuit:
+def llc_resonant(fsw: float = FR, dt: float = 100e-9) -> Circuit:
     """The full LLC converter at switching frequency ``fsw`` (default fr)."""
     ckt = Circuit(name="LLC_Resonant")
     with ckt:
-        _build_llc(ckt, fsw)
+        _build_llc(ckt, fsw, dt=dt)
     return ckt
