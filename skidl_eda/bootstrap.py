@@ -5,6 +5,7 @@ Turn an empty folder into a ready-to-design skidl-eda project. Scaffolds
 
     <base>/<name>/
       <name_snake>.py        # a runnable starter (skidl -> skidl_eda.generate)
+      run.ps1 / run.sh       # run scripts pinned to THIS interpreter (see below)
       design_log.md          # the append-only design record the skill keeps
       .mcp.json              # wires the kicad-sch-api MCP (read-only pin lookups)
       .claude/skills/design-circuit/SKILL.md   # the skidl-authoring design loop
@@ -13,7 +14,10 @@ Turn an empty folder into a ready-to-design skidl-eda project. Scaffolds
 This does **no** ``uv init`` / ``uv add`` by default: the skidl-eda stack is
 installed from source (not yet on PyPI), so a fresh ``uv add skidl-eda`` would
 fail. The scaffolded project is meant to run against the **same interpreter**
-that has skidl-eda installed. ``--generate`` runs the starter with that
+that has skidl-eda installed -- which is why the scaffold records the invoking
+``sys.executable`` into ``run.ps1``/``run.sh`` (LLC E2E fix R3: ``uv run
+python <file>.py`` in a fresh project dir resolves nothing and fails with
+``ModuleNotFoundError: skidl_eda``). ``--generate`` runs the starter with that
 interpreter to prove the project is real; the scaffold itself is pure file I/O
 (offline, no uv), so it is fully testable without a network or KiCad.
 """
@@ -75,7 +79,8 @@ def _starter_py(name: str, circuit: str) -> str:
         )
     return (
         '"""Starter design for {name} -- edit me (the design-circuit skill drives this).\n\n'
-        "Run:  python {snake}.py   (with the skidl-eda dev interpreter)\n"
+        "Run:  ./run.ps1 {snake}.py   (or ./run.sh {snake}.py -- pinned to the\n"
+        "skidl-eda interpreter; plain `uv run python` fails here, no pyproject)\n"
         '"""\n\n'
         "from skidl import Circuit, Net, Part, POWER\n"
         "from skidl_eda import setup_kicad10, generate, summarize\n\n\n"
@@ -91,6 +96,25 @@ def _starter_py(name: str, circuit: str) -> str:
     ).format(name=name, snake=snake, body=body)
 
 
+def _run_ps1(python_posix: str) -> str:
+    return (
+        "# Runs a script in this project with the interpreter that has skidl-eda\n"
+        "# installed (recorded at scaffold time). Usage: ./run.ps1 <script>.py [args]\n"
+        '$env:PYTHONUTF8 = "1"\n'
+        f'& "{python_posix}" @args\n'
+        "exit $LASTEXITCODE\n"
+    )
+
+
+def _run_sh(python_posix: str) -> str:
+    return (
+        "#!/bin/sh\n"
+        "# Runs a script in this project with the interpreter that has skidl-eda\n"
+        "# installed (recorded at scaffold time). Usage: ./run.sh <script>.py [args]\n"
+        f'PYTHONUTF8=1 exec "{python_posix}" "$@"\n'
+    )
+
+
 def _design_log(name: str) -> str:
     return (
         f"# design_log.md -- {name}\n\n"
@@ -100,7 +124,7 @@ def _design_log(name: str) -> str:
     )
 
 
-def _readme(name: str, snake: str) -> str:
+def _readme(name: str, snake: str, python_posix: str) -> str:
     return (
         f"# {name}\n\n"
         "A skidl-eda circuit project. The source of truth is the Python file "
@@ -112,18 +136,31 @@ def _readme(name: str, snake: str) -> str:
         "(`.mcp.json`) -- then describe the circuit you want.\n\n"
         "## Run it directly\n\n"
         "```\n"
-        f"python {snake}.py    # with the skidl-eda dev interpreter\n"
-        "```\n"
+        f"./run.ps1 {snake}.py    # PowerShell (or: ./run.sh {snake}.py in bash)\n"
+        "```\n\n"
+        "The run scripts use the interpreter that has skidl-eda installed "
+        f"(recorded at scaffold time):\n`{python_posix}`\n\n"
+        "Plain `uv run python` does NOT work here -- this project has no "
+        "pyproject, and the skidl-eda stack is installed from source, not PyPI. "
+        'Sanity check: `./run.sh -c "import skidl_eda"`.\n'
     )
 
 
 def scaffold_project(
-    name: str, base_dir=".", circuit: str = "rc_divider", with_skill: bool = True
+    name: str,
+    base_dir=".",
+    circuit: str = "rc_divider",
+    with_skill: bool = True,
+    interpreter: Optional[str] = None,
 ) -> Path:
     """Create ``<base_dir>/<name>/`` with the starter, skill, MCP config and log.
 
     Pure file I/O -- no uv, no network, no KiCad. Raises ``ValueError`` on a bad
     name and ``FileExistsError`` if the target dir already exists.
+
+    ``interpreter`` (default: the invoking ``sys.executable``, which has
+    skidl-eda installed) is recorded into ``run.ps1``/``run.sh`` so the
+    documented run command works in a project dir with no pyproject (R3).
     """
     if not _NAME_RE.match(name):
         raise ValueError(
@@ -138,13 +175,24 @@ def scaffold_project(
         raise FileExistsError(f"'{project}' already exists.")
 
     snake = _snake(name)
+    # Forward slashes work in PowerShell, sh, and Windows CreateProcess alike.
+    python_posix = Path(interpreter or sys.executable).as_posix()
     project.mkdir(parents=True)
     (project / f"{snake}.py").write_text(_starter_py(name, circuit), encoding="utf-8")
+    (project / "run.ps1").write_text(_run_ps1(python_posix), encoding="utf-8")
+    run_sh = project / "run.sh"
+    run_sh.write_text(_run_sh(python_posix), encoding="utf-8", newline="\n")
+    try:  # best-effort +x (no-op on Windows filesystems)
+        run_sh.chmod(run_sh.stat().st_mode | 0o755)
+    except OSError:  # pragma: no cover
+        pass
     (project / "design_log.md").write_text(_design_log(name), encoding="utf-8")
     (project / ".mcp.json").write_text(
         json.dumps(_MCP_JSON, indent=2) + "\n", encoding="utf-8"
     )
-    (project / "README.md").write_text(_readme(name, snake), encoding="utf-8")
+    (project / "README.md").write_text(
+        _readme(name, snake, python_posix), encoding="utf-8"
+    )
 
     if with_skill:
         skill_dir = project / ".claude" / "skills" / "design-circuit"

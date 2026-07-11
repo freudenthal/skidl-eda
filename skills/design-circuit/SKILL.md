@@ -35,8 +35,16 @@ simulation, sourcing/BOM) reads it.
   `lib_search_paths["kicad10"] = ["."] + default_lib_paths()` recipe — under a
   checkout carrying skidl's `tests/test_data` it silently shadows KiCad-10
   symbols with bundled KiCad-6 ones (KiCad-10-only parts vanish).
-- Windows note: run commands with UTF-8 mode, e.g. in bash `PYTHONUTF8=1 uv run
-  ...` (emoji prints crash captured output otherwise).
+- **Run commands with the interpreter that has `skidl_eda` installed.** A
+  scaffolded project ships `run.ps1`/`run.sh` pinned to it (`./run.sh <file>.py`);
+  for in-repo work use `<repo>/.venv-skidl314/Scripts/python` directly. Plain
+  `uv run python <file>.py` only works if the project has its own pyproject
+  wired to the stack — a fresh project dir has none, so it fails with
+  `ModuleNotFoundError: skidl_eda`. Sanity-check the interpreter once per
+  session: `<python> -c "import skidl_eda"`.
+- Windows note: run commands with UTF-8 mode, e.g. in bash `PYTHONUTF8=1
+  <python> ...` (emoji prints crash captured output otherwise); the scaffold's
+  run scripts already set it.
 
 ## Phase 1 — THINK
 - Restate the user's request as a spec: topology, inputs, outputs, constraints.
@@ -53,7 +61,8 @@ simulation, sourcing/BOM) reads it.
 
 ## Phase 2 — DISCOVER (symbol/footprint resolution)
 - NEVER guess lib ids. Verify each one:
-  `PYTHONUTF8=1 uv run python -m skidl_eda.sourcing.find_symbol "<query>"` (add
+  `PYTHONUTF8=1 <python> -m skidl_eda.sourcing.find_symbol "<query>"` (the
+  skidl-eda interpreter — the scaffold's run script or `.venv-skidl314`; add
   `--footprints` for footprints). Common: `Device:R`, `Device:C`, `Device:LED`,
   `Regulator_Linear:AMS1117-3.3`. In skidl a symbol is `Part("Device", "R")` —
   the `Lib:Name` id splits into the first two `Part(...)` args.
@@ -164,7 +173,10 @@ simulation, sourcing/BOM) reads it.
   usual (`result.get_voltage("V5")`) — no special handling needed.
 
 ## Phase 4 — GENERATE
-- Run: `PYTHONUTF8=1 uv run python <name>.py`
+- Run: `./run.ps1 <name>.py` (PowerShell) or `./run.sh <name>.py` (bash) — the
+  scaffold's run scripts, pinned to the skidl-eda interpreter. In-repo projects:
+  `PYTHONUTF8=1 <repo>/.venv-skidl314/Scripts/python <name>.py`. (NOT
+  `uv run python` — no pyproject in a fresh project dir; see Phase 0 note.)
 - `skidl_eda.generate(circuit, project_name, output_dir=...)` renders with the
   fork KiCad-10 renderer (netlist + hierarchical `.kicad_sch`), writes the
   `.kicad_pro` scaffold that makes the project **openable**, then runs the gate
@@ -459,7 +471,8 @@ invisible to those steps and are **overwritten the next time you regenerate**.
 2. **Change the Python.** Make the requested edit in code — component values,
    added/removed parts, net connections, `Sim_*` kwargs, MPN/Manufacturer
    kwargs. Follow the same `Part`/`Net` patterns as the rest of the file.
-3. **Regenerate.** Re-run the file: `PYTHONUTF8=1 uv run python <name>.py`.
+3. **Regenerate.** Re-run the file the Phase-4 way (`./run.ps1 <name>.py` /
+   `./run.sh <name>.py`, or the `.venv-skidl314` interpreter for in-repo work).
    **Note — skidl regenerates the schematic from scratch each run** (unlike a
    placement-preserving update mode). A plain regenerate does **not** keep manual
    KiCad placement. If the user has hand-placed/edited the schematic in KiCad and

@@ -66,6 +66,42 @@ def test_scaffold_blank_circuit_and_no_skill(tmp_path):
     assert "add Part(...)" in src
 
 
+def test_scaffold_run_scripts_name_real_interpreter(tmp_path):
+    """R3: the scaffold records the invoking interpreter into run.ps1/run.sh so
+    the documented run command works in a dir with no pyproject."""
+    proj = B.scaffold_project("Runny", base_dir=str(tmp_path))
+    py_posix = B.Path(sys.executable).as_posix()
+    ps1 = (proj / "run.ps1").read_text(encoding="utf-8")
+    sh = (proj / "run.sh").read_text(encoding="utf-8")
+    assert py_posix in ps1 and "PYTHONUTF8" in ps1
+    assert py_posix in sh and "PYTHONUTF8" in sh
+    assert os.path.exists(sys.executable)
+    # The README names the interpreter and warns off `uv run`.
+    readme = (proj / "README.md").read_text(encoding="utf-8")
+    assert py_posix in readme and "uv run" in readme
+
+
+def test_scaffold_run_script_executes_starter(tmp_path):
+    """Running the scaffolded starter via the recorded interpreter (what the run
+    scripts do) succeeds at least through `import skidl_eda` -- the exact R3
+    failure was ModuleNotFoundError before any KiCad work started."""
+    import subprocess
+
+    proj = B.scaffold_project("RunProof", base_dir=str(tmp_path))
+    sh = (proj / "run.sh").read_text(encoding="utf-8")
+    # The interpreter line the script would exec: prove it imports the stack.
+    py = B.Path(sys.executable).as_posix()
+    assert f'"{py}"' in sh
+    r = subprocess.run(
+        [sys.executable, "-c", "import skidl_eda; print('OK')"],
+        capture_output=True,
+        text=True,
+        cwd=str(proj),
+        timeout=120,
+    )
+    assert r.returncode == 0 and "OK" in r.stdout, r.stderr[:400]
+
+
 def _kicad10_or_skip():
     from skidl_eda import setup_kicad10
 

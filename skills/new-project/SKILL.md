@@ -23,8 +23,11 @@ the folder, scaffolds a runnable starter (skidl → `skidl_eda.generate`), the
 ## Environment note (installed-from-source stack)
 The skidl-eda stack is installed from source (not yet on PyPI), so this bootstrap
 does **no** `uv init` / `uv add`. The scaffolded project runs against the **same
-interpreter that has skidl-eda installed**. The scaffold step is
-offline (pure file I/O); `--generate` runs the starter with that interpreter.
+interpreter that has skidl-eda installed** — the bootstrap records it into the
+scaffold's `run.ps1`/`run.sh`, so inside the project `./run.ps1 <file>.py` (or
+`./run.sh <file>.py`) is the run command; plain `uv run python` fails there
+(no pyproject). The scaffold step is offline (pure file I/O); `--generate` runs
+the starter with that interpreter.
 
 ## Run it
 
