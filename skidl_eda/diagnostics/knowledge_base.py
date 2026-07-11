@@ -182,6 +182,36 @@ class DebugKnowledgeBase:
                 },
             ),
             DebugPattern(
+                pattern_id=self._generate_pattern_id(["LLC", "output", "low"]),
+                category="power",
+                symptoms=[
+                    "LLC output voltage low",
+                    "Resonant converter output below target",
+                    "Half-bridge converter gain wrong",
+                    "MOSFETs hot / hard switching",
+                ],
+                root_cause=(
+                    "LLC operating point / timing: switching frequency above the "
+                    "resonant fr (buck region -> low gain), deadtime too short for "
+                    "ZVS (hard switching, hot FETs), or the magnetizing/turns "
+                    "ratio set wrong"
+                ),
+                solutions=[
+                    "Lower FSW toward/below fr = 1/(2*pi*sqrt(Lr*Cr)) to raise gain",
+                    "Check Vout ~= n*(Vin/2) - Vf at resonance; fix the turns ratio n",
+                    "Size the deadtime so V(sw) swings rail-to-rail before the "
+                    "opposite gate rises (ZVS); too short -> hard switching",
+                    "Verify Lm (transformer primary LP) and Lr/Cr give the intended "
+                    "fr and Ln = Lm/Lr",
+                ],
+                component_types=["Transformer_1P_SS", "MOSFET", "HALFBRIDGE"],
+                typical_measurements={
+                    "vout_v": 8.0,
+                    "vds_at_turnon_v": 48.0,
+                    "fsw_khz": 150,
+                },
+            ),
+            DebugPattern(
                 pattern_id=self._generate_pattern_id(["USB", "enumeration", "fail"]),
                 category="digital",
                 symptoms=[

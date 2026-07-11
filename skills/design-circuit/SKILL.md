@@ -345,9 +345,48 @@ entry point and the `Sim_*` attribute spelling differ.
   are **open-loop computed-duty** models (no load-step recovery, non-synchronous,
   no current limit). For buck loop stability use the **averaged** model:
   `Sim_Params="... vref=0.8 mode=avg"` + `.ac_analysis` + voltage injection
-  (`res.loop_gain`/`phase_margin`/`gain_margin`). Forward/half-bridge/LLC and
-  **multi-winding transformers are not simulatable yet** — say so rather than
-  approximating.
+  (`res.loop_gain`/`phase_margin`/`gain_margin`).
+- **Half-bridge / LLC resonant converters** are simulatable via a switch-stage
+  macromodel: put `Sim_Device="HALFBRIDGE"` (alias `"LLC"`) on any switcher-shaped
+  symbol (SW/VIN/GND pins) with `Sim_Params="fsw=100k dt=100n ron=0.1"` (only
+  `fsw` required). It replaces **only the two switches** — a complementary
+  50 %-duty S-switch pair with deadtime and **built-in antiparallel diodes** — so
+  your resonant tank (Lr, Cr), transformer and rectifier stay real parts. It is
+  **open-loop: FSW is the control variable**, so obtain the DC gain curve by
+  **sweeping FSW across `.tran` runs** (there is no duty/VOUT computation). An LLC
+  gain peaks at the parallel resonance `fp = 1/(2π√((Lr+Lm)Cr))` and crosses unity
+  (`M≈1 → Vout ≈ n·Vin/2 − Vf`) at `fr = 1/(2π√(Lr·Cr))`, monotonically
+  decreasing above `fr` (buck region). See `canaries/llc_resonant/`.
+- **Multi-winding transformers.** `Transformer_1P_1S` (AA/AB, SA/SB),
+  `Transformer_1P_2S` (adds an independent SC/SD secondary), and the
+  center-tapped `Transformer_1P_SS` (SA/SC/SB, SC = tap) all simulate as coupled
+  inductors. `Sim_Params="lp=100u n=0.5"`: `LP` = primary self-inductance (which
+  **is** the magnetizing inductance Lm for an LLC), each secondary from a turns
+  ratio `n`/`n2`/`n3` (or explicit `ls`/`ls2`). **Center-tap `n` is per-half** —
+  each half winding is `LP·n²`, both halves share `n` unless `n2` is given. `k`
+  (default 0.999) couples every winding pair. All winding ends must be connected.
+  Isolated secondaries need a DC path to the sim GND (a center tap grounds via
+  the tap).
+- **Stiff switching transients** (half-bridge/LLC/resonant tanks) need
+  `transient_analysis(..., stiff=True)` — it merges a gear/reltol/abstol/gmin/itl4
+  convergence recipe. Also pass `use_initial_condition=True` (skip the op point;
+  for a resonant start seed `initial_conditions={"VOUT": 0}`) and keep
+  `max_time ≤ per/50` (per = 1/fsw) so switch edges aren't aliased. If a switch
+  node still won't converge, add an RC snubber across it or shorten `end_time`.
+- **Device-level switches (power MOSFETs).** For higher fidelity than the
+  HALFBRIDGE macromodel — real Coss + body-diode reverse conduction, so ZVS is
+  visible — build the bridge from two MOSFETs. Name a curated power part in
+  `value` (`"IRF540N"`, `"IRLZ44N"`, `"IRFZ44N"`) to get a Level-1 fit **plus** an
+  auto-emitted antiparallel body diode + drain-source Coss; `value="powernmos"`
+  is a generic power NMOS (conduction only, no companions); `Sim_Params="COSS=470p
+  BODY=1"` forces companions onto any MOSFET. Size the **deadtime** so the tank
+  current swings V(sw) rail-to-rail before the opposite gate rises (too short →
+  hard switching). See `canaries/llc_resonant/llc_devicelevel.py`.
+- **Honest remaining limits (say so rather than approximating):**
+  forward-converter and other single-ended isolated topologies are **not**
+  simulatable yet (no forward-reset model). The half-bridge/LLC model is
+  **open-loop only** — no burst-mode / frequency-control feedback loop — and the
+  macromodel underestimates switching losses (ideal switches).
 - **Simulation-only model controls (`Sim_*`, as `Part` kwargs):**
   `Sim_Enable="0"` excludes a part from simulation (symbol/footprint stay — use
   it for connectors/test points); `Sim_Params="bf=250 vaf=80"` overrides model
