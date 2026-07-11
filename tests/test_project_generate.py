@@ -108,3 +108,99 @@ def test_generate_full_pipeline_passes_gates(tmp_path):
     for k in ("bom", "pdf"):
         step = result["steps"][k]
         assert step.get("success") or step.get("skipped"), (k, step)
+
+
+def _force_divergence(monkeypatch, equiv_value=False):
+    """Make the drawing-connectivity gate report a given equiv, and spy on
+    re-renders. Returns a dict tracking generate_schematic auto_stub kwargs."""
+    import skidl_eda.gates.drawing_connectivity as DC
+
+    def fake_check(sch, net, kicad_cli=None):
+        return {"ok": equiv_value, "equiv": equiv_value, "messages": []
+                if equiv_value else ["DRAIN1 [Q1.2, D2.1] differs"]}
+
+    monkeypatch.setattr(DC, "check_drawing_connectivity", fake_check)
+
+
+def test_auto_stub_self_heal_fires_on_divergence(tmp_path, monkeypatch):
+    _kicad10_or_skip()
+    if not find_kicad_cli():
+        pytest.skip("kicad-cli not installed")
+    import sipm_tia_skidl as T
+
+    # The connectivity gate always diverges -> the self-heal should re-render
+    # with auto_stub=True and record the fallback flag (+ hint, still diverging).
+    _force_divergence(monkeypatch, equiv_value=False)
+
+    calls = []
+    from skidl import Circuit
+
+    orig = Circuit.generate_schematic
+
+    def spy(self, *a, **k):
+        calls.append(k.get("auto_stub"))
+        return orig(self, *a, **k)
+
+    monkeypatch.setattr(Circuit, "generate_schematic", spy, raising=False)
+
+    c = T.sipm_tia()
+    result = P.generate(c, "SiPM_SelfHeal", output_dir=str(tmp_path))
+    # rendered at least twice, the retry with auto_stub=True
+    assert True in calls, calls
+    dc = result["steps"]["drawing_connectivity"]
+    assert dc.get("auto_stub_fallback") is True, dc
+    assert "hint" in dc, dc
+
+
+def test_auto_stub_self_heal_records_pass_on_second_render(tmp_path, monkeypatch):
+    _kicad10_or_skip()
+    if not find_kicad_cli():
+        pytest.skip("kicad-cli not installed")
+    import sipm_tia_skidl as T
+    import skidl_eda.gates.drawing_connectivity as DC
+
+    # Diverge on the first check, match on the retry -> fallback PASS, no hint.
+    seq = {"n": 0}
+
+    def fake_check(sch, net, kicad_cli=None):
+        seq["n"] += 1
+        equiv = seq["n"] >= 2
+        return {"ok": equiv, "equiv": equiv, "messages": [] if equiv else ["x"]}
+
+    monkeypatch.setattr(DC, "check_drawing_connectivity", fake_check)
+
+    c = T.sipm_tia()
+    result = P.generate(c, "SiPM_SelfHeal2", output_dir=str(tmp_path))
+    dc = result["steps"]["drawing_connectivity"]
+    assert dc.get("equiv") is True and dc.get("auto_stub_fallback") is True, dc
+    assert "hint" not in dc, dc
+
+
+def test_explicit_auto_stub_false_suppresses_retry(tmp_path, monkeypatch):
+    _kicad10_or_skip()
+    if not find_kicad_cli():
+        pytest.skip("kicad-cli not installed")
+    import sipm_tia_skidl as T
+
+    _force_divergence(monkeypatch, equiv_value=False)
+
+    calls = []
+    from skidl import Circuit
+
+    orig = Circuit.generate_schematic
+
+    def spy(self, *a, **k):
+        calls.append(k.get("auto_stub"))
+        return orig(self, *a, **k)
+
+    monkeypatch.setattr(Circuit, "generate_schematic", spy, raising=False)
+
+    c = T.sipm_tia()
+    result = P.generate(
+        c, "SiPM_NoRetry", output_dir=str(tmp_path),
+        renderer_options={"auto_stub": False},
+    )
+    # exactly one render; no auto_stub=True retry
+    assert calls == [False], calls
+    dc = result["steps"]["drawing_connectivity"]
+    assert not dc.get("auto_stub_fallback"), dc

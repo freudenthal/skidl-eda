@@ -307,10 +307,12 @@ def generate(
             logger.warning("footprint check errored: %s", e)
             steps["footprint"] = {"ok": True, "warnings": 0, "error": str(e)}
 
-    # --- 5. ERC gate (autofix opt-in; report-only unless erc_must_be_clean) --
-    erc_clean = None  # None = not run / unavailable
-    erc_hard_fail = False
-    if run_erc_gate and steps.get("schematic", {}).get("ok"):
+    # Gate helpers (steps 5/6/6b) -- defined as closures so the auto_stub
+    # self-heal below can re-run them on a re-rendered schematic.
+    def _do_erc():
+        """Run the ERC gate on the current schematic -> (erc_clean, hard_fail)."""
+        if not (run_erc_gate and steps.get("schematic", {}).get("ok")):
+            return None, False
         try:
             if erc_autofix:
                 report = erc_gate(schematic_file, kicad_cli_path=kicad_cli)
@@ -333,30 +335,34 @@ def generate(
                 "autofixes_applied": report.autofixes_applied,
                 "summary": report.summary(),
             }
-            erc_clean = report.error_count == 0
             # Only gate when the caller demands a clean ERC.
-            erc_hard_fail = erc_must_be_clean and report.error_count > 0
+            return report.error_count == 0, (
+                erc_must_be_clean and report.error_count > 0
+            )
         except ErcUnavailable as e:
             steps["erc"] = {"ok": True, "skipped": True, "error": str(e)}
+            return None, False
         except Exception as e:  # noqa: BLE001
             logger.error("ERC gate errored: %s", e)
             steps["erc"] = {"ok": False, "skipped": False, "error": str(e)}
-            erc_hard_fail = erc_must_be_clean
+            return None, erc_must_be_clean
 
-    # --- 6. save-crash gate -------------------------------------------------
-    save_hard_fail = False
-    if run_save_gate and steps.get("schematic", {}).get("ok"):
+    def _do_save():
+        """Run the save-crash gate on the current schematic -> hard_fail bool."""
+        if not (run_save_gate and steps.get("schematic", {}).get("ok")):
+            return False
         res = check_save_ok(schematic_file, kicad_cli)
         steps["save_gate"] = res
-        save_hard_fail = not res["ok"] and not res["skipped"]
+        return not res["ok"] and not res["skipped"]
 
-    # --- 6b. drawing-vs-netlist connectivity gate (report-only by default) ---
-    drawing_hard_fail = False
-    if (
-        run_drawing_connectivity
-        and steps.get("schematic", {}).get("ok")
-        and steps.get("netlist", {}).get("ok")
-    ):
+    def _do_drawing():
+        """Run the drawing-connectivity gate -> (dc_dict_or_None, hard_fail)."""
+        if not (
+            run_drawing_connectivity
+            and steps.get("schematic", {}).get("ok")
+            and steps.get("netlist", {}).get("ok")
+        ):
+            return None, False
         try:
             from .gates.drawing_connectivity import check_drawing_connectivity
 
@@ -364,8 +370,7 @@ def generate(
                 schematic_file, netlist_file, kicad_cli=kicad_cli
             )
             steps["drawing_connectivity"] = dc
-            if drawing_must_match and dc.get("equiv") is False:
-                drawing_hard_fail = True
+            return dc, (drawing_must_match and dc.get("equiv") is False)
         except Exception as e:  # noqa: BLE001 - never break the loop
             logger.warning("drawing connectivity gate errored: %s", e)
             steps["drawing_connectivity"] = {
@@ -374,6 +379,63 @@ def generate(
                 "equiv": None,
                 "error": str(e),
             }
+            return None, False
+
+    # --- 5. ERC gate --- 6. save gate --- 6b. drawing connectivity ----------
+    erc_clean, erc_hard_fail = _do_erc()
+    save_hard_fail = _do_save()
+    dc, drawing_hard_fail = _do_drawing()
+
+    # --- 6c. auto_stub self-heal (C6) ---------------------------------------
+    # A dense flat sheet can render with the A* router leaving drawing != netlist
+    # (drawing_connectivity DIVERGES) while result["ok"] stays True -- a visually
+    # wrong schematic could ship. When that happens and the render used the
+    # default (no auto_stub), re-render once with auto_stub=True (stub high-fanout
+    # nets to labels before routing) and re-run the downstream gates. An explicit
+    # user renderer_options={"auto_stub": False} is honored: no retry.
+    user_auto_stub = (renderer_options or {}).get("auto_stub", None)
+    if (
+        dc is not None
+        and dc.get("equiv") is False
+        and not render_opts.get("auto_stub")
+        and user_auto_stub is not False
+    ):
+        logger.info(
+            "drawing_connectivity diverged; retrying render with auto_stub=True"
+        )
+        try:
+            retry_opts = dict(render_opts)
+            retry_opts["auto_stub"] = True
+            circuit.generate_schematic(
+                tool=KICAD10,
+                filepath=str(project_dir),
+                top_name=top_name,
+                **retry_opts,
+            )
+            ok = schematic_file.exists() and schematic_file.stat().st_size > 0
+            steps["schematic"] = {
+                "ok": ok,
+                "file": str(schematic_file),
+                "skidl_log_errors": _skidl_log_errors(),
+                "auto_stub_fallback": True,
+            }
+            # Re-run the gates that depend on the schematic.
+            erc_clean, erc_hard_fail = _do_erc()
+            save_hard_fail = _do_save()
+            dc, drawing_hard_fail = _do_drawing()
+            if isinstance(steps.get("drawing_connectivity"), dict):
+                steps["drawing_connectivity"]["auto_stub_fallback"] = True
+                if dc is not None and dc.get("equiv") is False:
+                    steps["drawing_connectivity"]["hint"] = (
+                        "sheet too dense - split into @subcircuit sheets"
+                    )
+        except Exception as e:  # noqa: BLE001 - never break the loop
+            logger.warning("auto_stub self-heal re-render failed: %s", e)
+
+    # gen_ok can change if the self-heal re-render failed; recompute.
+    gen_ok = all(
+        steps.get(k, {}).get("ok") for k in ("netlist", "schematic", "project")
+    )
 
     # --- 7. exports (skip-tolerant, non-gating) -----------------------------
     if export_bom and steps.get("schematic", {}).get("ok"):
@@ -465,10 +527,14 @@ def summarize(result: Dict[str, Any]) -> str:
         elif name == "drawing_connectivity" and not step.get("skipped"):
             equiv = step.get("equiv")
             ndiff = len(step.get("messages") or [])
+            fb = " auto_stub fallback" if step.get("auto_stub_fallback") else ""
             if equiv is True:
-                extra = " (matches netlist)"
+                extra = f" (matches netlist;{fb})" if fb else " (matches netlist)"
             elif equiv is False:
-                extra = f" (DIVERGES: {ndiff} diff)"
+                extra = f" (DIVERGES: {ndiff} diff{fb})"
+                hint = step.get("hint")
+                if hint:
+                    extra += f" -- {hint}"
                 state = "WARN"  # report-only unless drawing_must_match
             else:
                 extra = ""
