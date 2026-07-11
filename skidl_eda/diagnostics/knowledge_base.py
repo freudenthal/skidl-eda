@@ -249,6 +249,65 @@ class DebugKnowledgeBase:
                 },
             ),
             DebugPattern(
+                pattern_id=self._generate_pattern_id(
+                    ["oscillator", "wont", "start"]),
+                category="power",
+                symptoms=[
+                    "oscillator won't start",
+                    "timestep too small at t=0",
+                    "self-oscillating converter never starts",
+                    "singular matrix at start of transient",
+                    "Timestep too small; time=1e-18",
+                ],
+                root_cause=(
+                    "A symmetric self-oscillating (Royer/Mazzilli ZVS) converter "
+                    "will NOT start from a clean DC point, and any degenerate/"
+                    "floating node makes ngspice die at t=0: (a) no asymmetric "
+                    ".ic kick; (b) the gate seed is above the rail at low VBUS; "
+                    "(c) an isolated transformer winding lacks a DC path to node 0 "
+                    "(a `gnd += other_net` merge left a degenerate node)."
+                ),
+                solutions=[
+                    "Seed an asymmetric .ic (one gate high, opposite drain at "
+                    "VBUS) with stiff=True + use_initial_condition=True",
+                    "Clamp the gate seed to min(clamp_voltage, VBUS) so a "
+                    "low-VBUS sweep point doesn't seed above the rail",
+                    "Tie every isolated winding directly to the GND net object "
+                    "(node 0), not via a separate net merged into GND -- the only "
+                    "symptom of the degenerate node is 'singular matrix: check "
+                    "node <net>'",
+                    "See canaries/royer_zvs/ for the working start-up recipe",
+                ],
+                component_types=["Transformer_1P_SS", "MOSFET", "Royer", "ZVS"],
+                typical_measurements={"t_fail_s": 6e-18, "vbus_v": 6.0},
+            ),
+            DebugPattern(
+                pattern_id=self._generate_pattern_id(
+                    ["oscillator", "parasitic", "frequency"]),
+                category="power",
+                symptoms=[
+                    "self-oscillator runs at 10-100x the designed frequency",
+                    "oscillation frequency far above LC estimate",
+                    "small-amplitude high-frequency limit cycle",
+                    "measured f_osc doesn't match the tank",
+                ],
+                root_cause=(
+                    "The tank capacitor (Cres) is below its stability floor "
+                    "(~10 nF in the worked example), so the oscillator jumps to a "
+                    "parasitic ~MHz mode with small amplitude instead of the "
+                    "intended ~tens-of-kHz resonant tank mode."
+                ),
+                solutions=[
+                    "Raise Cres back above the floor; raise f_osc by LOWERING the "
+                    "winding inductance (LP) instead of shrinking Cres",
+                    "Sanity-check the measured f_osc against 1/(2*pi*sqrt(L*C)); "
+                    "a 10x+ mismatch means a parasitic mode, not the tank",
+                    "See canaries/royer_zvs/ for the LP-vs-Cres tuning",
+                ],
+                component_types=["Transformer_1P_SS", "MOSFET", "Royer", "ZVS"],
+                typical_measurements={"f_osc_khz": 2041, "cres_nf": 2.7},
+            ),
+            DebugPattern(
                 pattern_id=self._generate_pattern_id(["USB", "enumeration", "fail"]),
                 category="digital",
                 symptoms=[

@@ -82,6 +82,9 @@ simulation, sourcing/BOM) reads it.
   has a model for a candidate part with
   `python -m skidl_eda.sourcing.find_spice_model "<NAME>" --type <kind>` — model
   availability can inform part choice. See Phase 5 for attaching the model.
+  **Zeners have no built-in card** — for a gate/rail clamp search `--type zener`
+  (permissive corpus hits exist, e.g. `DI_1N4742A`) or use a generic diode with
+  `Sim_Params="BV=<Vz>"`.
 - **Sourcing / availability (OPTIONAL — only when the user asks for real parts,
   a BOM, or sourcing, or supplies MPNs).** Check real stock/price with
   `skidl_eda.sourcing.check_availability("<query>")`. **JLCPCB works without any
@@ -417,6 +420,29 @@ entry point and the `Sim_*` attribute spelling differ.
   the body-diode-conduction signature of a completed resonant transition —
   coarse or early-cycle sampling reports phantom hard switching. Reusable
   snippet: `canaries/llc_resonant/zvs_metric.py`.
+- **Self-oscillating converters (Royer / Mazzilli ZVS).** A cross-coupled
+  self-oscillating driver (24 V → ~2 kV push-pull resonant step-up) simulates on
+  real ngspice, but the start-up and tuning are non-obvious — the worked example
+  is `canaries/royer_zvs/`. Four hard-won lessons:
+  * **It will not self-start from a clean DC point** (the circuit is symmetric).
+    Seed an asymmetric `.ic` kick — one gate high, the opposite drain at VBUS —
+    with `stiff=True` + `use_initial_condition=True`. **Clamp the gate seed to
+    `min(clamp_voltage, VBUS)`**: an unclamped seed above the rail collapses the
+    first timestep at low VBUS (`Timestep too small … at t≈0`).
+  * **Isolated windings need a direct tie to the `GND` net object** — a separate
+    net merged in via `gnd += other_net` can leave a degenerate node whose only
+    symptom is `singular matrix: check node <net>` + a t≈0 timestep collapse
+    (reads like a model bug; the fix is "tie this winding to node 0").
+  * **Tap-collapse trap.** If the drain peak ≪ π·Vin and the center tap sags far
+    below Vin, the drive-winding per-half inductance is too low (magnetizing
+    current collapses the tap). Fix by **raising winding L and shrinking Cres at
+    constant L·C** — not by the choke.
+  * **Cres stability floor.** Shrinking the tank cap below a floor (~10 nF in the
+    worked example) jumps the oscillator to a parasitic ~MHz mode (small
+    amplitude). Raise f_osc by **lowering winding inductance**, not Cres. Always
+    sanity-check a measured f_osc against the LC estimate; a ×10+ mismatch means
+    a parasitic mode, not the tank. A real winding DCR (`Sim_Params` `rp=`/`rs=`
+    on the transformer) breaks the ideal-inductor tap degeneracy if you need it.
 - **Honest remaining limits (say so rather than approximating):**
   forward-converter and other single-ended isolated topologies are **not**
   simulatable yet (no forward-reset model). The half-bridge/LLC model is
@@ -440,10 +466,14 @@ entry point and the `Sim_*` attribute spelling differ.
   real part whose model isn't a built-in `datasheet_fit` card, search the corpus
   instead of guessing params:
   `python -m skidl_eda.sourcing.find_spice_model <NAME> [--type diode|bjt|mosfet|jfet|opamp] --verify`.
-  It prints a paste-ready block — the `.lib`/`.subckt` name, file, **license
-  tier**, the recovered **subckt node order** (so you never misorder subckt
-  pins), and the exact `Sim_*` kwargs; `--verify` confirms ngspice loads it.
-  Two ways to use a hit:
+  It prints a block — the `.lib`/`.subckt` name, file, **license tier**, the
+  recovered **subckt node order** (so you never misorder subckt pins), and the
+  `Sim_*` kwargs; `--verify` confirms ngspice loads it. **A bare `.model` block
+  is paste-ready; a `.subckt` block is NOT** — its `Sim_Pins="<pinN>=<node>"`
+  left-hand `<pinN>` are placeholders for YOUR symbol's pin **numbers** (replace
+  them; keep the right-hand node values verbatim). A wrong `Sim_Pins` now raises
+  a clear Python error naming your symbol's pins and the subckt's nodes (no more
+  cryptic ngspice "Too few parameters"). Two ways to use a hit:
   * **Auto-resolve (simplest):** set `SKIDL_SPICE_LIB_PATH` to the corpus
     `Models` dir (once), then just name the part in `value` (or `Sim_Name`).
     Bare `.model` parts (most diodes/BJTs/MOSFETs) resolve with no pin mapping;
@@ -455,7 +485,15 @@ entry point and the `Sim_*` attribute spelling differ.
     `Sim_Name="<NAME>"` (+ `Sim_Pins`) block the CLI emits.
   Always keep `Sim_Compat="psa"` for corpus models. Corpus models are real but
   **unvetted** — prefer a built-in `datasheet_fit` when one exists, and treat a
-  `library_index` provenance as "vendor model, self-verify". If you obtain the
+  `library_index` provenance as "vendor model, self-verify". **The license tier
+  is advisory metadata only** — a `vendor_restricted` model still loads and
+  simulates normally; you own redistribution-terms compliance (only
+  `--into-store` gates on it). **No built-in zener card exists** — for a zener
+  clamp, search `find_spice_model "<part>" --type zener` (the corpus has
+  permissive hits, e.g. `DI_1N4742A`), or fall back to a generic diode with
+  `Sim_Params="BV=<Vz>"` and declare it generic. If the corpus is present but
+  `SKIDL_SPICE_LIB_PATH` is unset the CLI now prints a one-line reminder that
+  `value="<NAME>"` auto-resolve won't fire until you set it. If you obtain the
   corpus first: `python -m skidl_eda.sourcing.find_spice_model --help` (or
   `skidl_eda.sourcing.spice_library.ensure_library(install=True)`) prints the
   one-line `git clone`. Optional gated check: `generate(..., verify_models=True)`
