@@ -77,6 +77,11 @@ simulation, sourcing/BOM) reads it.
   `find_pins_by_name`, `find_pins_by_type`. Optional: if the server is not
   connected, rely on `find_symbol` and the reference `.py` instead — a missing
   MCP server must not stop the loop.
+- **SPICE model availability (OPTIONAL — when the design will be simulated and a
+  part needs a real vendor model).** Check whether the KiCad-Spice-Library corpus
+  has a model for a candidate part with
+  `python -m skidl_eda.sourcing.find_spice_model "<NAME>" --type <kind>` — model
+  availability can inform part choice. See Phase 5 for attaching the model.
 - **Sourcing / availability (OPTIONAL — only when the user asks for real parts,
   a BOM, or sourcing, or supplies MPNs).** Check real stock/price with
   `skidl_eda.sourcing.check_availability("<query>")`. **JLCPCB works without any
@@ -428,7 +433,33 @@ entry point and the `Sim_*` attribute spelling differ.
   rejects by default (`PARAMS:`, `VALUE={IF(...)}`). Run them with
   `simulate(circuit, compat="psa").operating_point()` (`psa` = PSpice +
   whole-netlist), or put `Sim_Compat="psa"` on the part with the `Sim_Library`.
-  Encrypted vendor models (`.enc`) can't be used by ngspice.
+  Encrypted vendor models (`.enc`) can't be used by ngspice. (KiCad's bundled
+  ngspice codemodels — incl. `spice2poly.cm`, needed for the `POLY(n)` sources in
+  most vendor op-amp/IC macromodels — are now loaded automatically.)
+- **Vendor model library (KiCad-Spice-Library, ~50k models).** When you need a
+  real part whose model isn't a built-in `datasheet_fit` card, search the corpus
+  instead of guessing params:
+  `python -m skidl_eda.sourcing.find_spice_model <NAME> [--type diode|bjt|mosfet|jfet|opamp] --verify`.
+  It prints a paste-ready block — the `.lib`/`.subckt` name, file, **license
+  tier**, the recovered **subckt node order** (so you never misorder subckt
+  pins), and the exact `Sim_*` kwargs; `--verify` confirms ngspice loads it.
+  Two ways to use a hit:
+  * **Auto-resolve (simplest):** set `SKIDL_SPICE_LIB_PATH` to the corpus
+    `Models` dir (once), then just name the part in `value` (or `Sim_Name`).
+    Bare `.model` parts (most diodes/BJTs/MOSFETs) resolve with no pin mapping;
+    a `.subckt` (op-amps, ICs) also needs `Sim_Pins` (or `Sim_Prefer="library"`).
+    A curated `datasheet_fit` card always wins over the corpus unless you set
+    `Sim_Prefer="library"`. The tier is recorded as `vendor_lib` / source
+    `library_index` in `sim.model_provenance[ref]`.
+  * **Explicit (no env var):** paste the `Sim_Library="<abs path>"` +
+    `Sim_Name="<NAME>"` (+ `Sim_Pins`) block the CLI emits.
+  Always keep `Sim_Compat="psa"` for corpus models. Corpus models are real but
+  **unvetted** — prefer a built-in `datasheet_fit` when one exists, and treat a
+  `library_index` provenance as "vendor model, self-verify". If you obtain the
+  corpus first: `python -m skidl_eda.sourcing.find_spice_model --help` (or
+  `skidl_eda.sourcing.spice_library.ensure_library(install=True)`) prints the
+  one-line `git clone`. Optional gated check: `generate(..., verify_models=True)`
+  smoke-tests every corpus-resolved part and reports under `model_verification`.
 - **Keeping a part out of the BOM:** `Sim_Enable="0"` is *not* a BOM control. For
   a **model-only passive** with no physical part (e.g. a device's internal
   terminal capacitance you add just for the sim), pass `Part(..., in_bom=False)`

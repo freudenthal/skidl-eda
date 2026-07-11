@@ -128,6 +128,7 @@ def generate(
     erc_must_be_clean: bool = False,
     evaluate: bool = True,
     reference_netlist: Optional[str] = None,
+    verify_models: bool = False,
     pcb: bool = False,
     pcb_output: Optional[str] = None,
     fp_lib_dirs: Optional[list] = None,
@@ -169,6 +170,11 @@ def generate(
             netlist (grade + per-check breakdown); report-only, never gates.
         reference_netlist: an optional golden ``.net`` to score against (the
             regression oracle) — appears under ``result["evaluation"]["oracle"]``.
+        verify_models: opt-in, report-only. Smoke-test every part whose SPICE
+            model resolves in the configured KiCad-Spice-Library index (confirm
+            ngspice loads it), recording results under
+            ``result["model_verification"]``. Off by default; never gates.
+            Degrades to a ``skipped`` step when the corpus isn't available.
         pcb: run the gated skidl-layout PCB step (plan a placement + write a
             scored ``.kicad_pcb`` into the project dir). Off by default and
             **report-only** (a poor layout score never fails the project);
@@ -397,6 +403,18 @@ def generate(
             logger.warning("evaluation errored: %s", e)
             steps["evaluation"] = {"ok": True, "grade": None, "error": str(e)}
 
+    # --- 8b. vendor-model verification (opt-in, report-only, never gates) ---
+    if verify_models:
+        try:
+            from .sourcing.spice_library import verify_circuit_models
+
+            mv = verify_circuit_models(circuit)
+            result["model_verification"] = mv
+            steps["model_verification"] = mv
+        except Exception as e:  # noqa: BLE001
+            logger.warning("model verification errored: %s", e)
+            steps["model_verification"] = {"ok": True, "skipped": True, "error": str(e)}
+
     # --- 9. gated PCB step (opt-in, report-only, never gates) ---------------
     if pcb:
         try:
@@ -466,6 +484,16 @@ def summarize(result: Dict[str, Any]) -> str:
                 + (f", oracle {'MATCH' if om else 'DRIFT'}" if om is not None else "")
                 + ")"
             )
+        elif name == "model_verification" and not step.get("skipped"):
+            nfail = len(step.get("failed") or [])
+            extra = (
+                f" ({step.get('vendor_models', 0)} vendor models"
+                + (f", {step.get('explicit_libraries', 0)} pinned"
+                   if step.get("explicit_libraries") else "")
+                + (f", {nfail} FAILED-TO-LOAD" if nfail else "")
+                + ")"
+            )
+            state = "WARN" if nfail else state  # report-only
         elif name == "pcb" and not step.get("skipped"):
             sc = step.get("score")
             extra = (

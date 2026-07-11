@@ -1,0 +1,5 @@
+* ACME Semiconductor macromodel. ACME reserves the right to change this model.
+* Provided "as is" for use with ngspice.
+.subckt ACMEOPA 1 2 3 4 5
+r1 1 5 1k
+.ends

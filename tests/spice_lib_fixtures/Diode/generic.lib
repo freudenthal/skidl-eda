@@ -1,0 +1,2 @@
+* Generic diode library. You are welcome to make as many copies as convenient.
+.MODEL FIXD D (IS=100E-15 RS=16 BV=100)

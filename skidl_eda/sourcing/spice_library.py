@@ -324,3 +324,60 @@ def smoke_test(name: str, models_dir: Optional[str] = None,
     finally:
         ng_log.setLevel(prev_level)
     return res
+
+
+def _part_model_name(part) -> Optional[str]:
+    """The model name a skidl part would resolve against the library index:
+    Sim.Name (dotted or underscore), else MPN, else value."""
+    for attr in ("Sim_Name", "Sim.Name"):
+        v = getattr(part, attr, None)
+        if v:
+            return str(v)
+    for attr in ("MPN", "mpn"):
+        v = getattr(part, attr, None)
+        if v:
+            return str(v)
+    v = getattr(part, "value", None)
+    return str(v) if v else None
+
+
+def verify_circuit_models(circuit, models_dir: Optional[str] = None,
+                          compat: str = "psa") -> dict:
+    """Report-only: smoke-test every part in ``circuit`` whose model resolves in
+    the library index. Returns a dict for ``generate()``'s result.
+
+    Parts with an explicit ``Sim_Library`` are listed as user-pinned (the
+    converter validates them at sim time); passives/sources whose value isn't a
+    model name simply don't resolve and are skipped.
+    """
+    index = build_catalog(models_dir)
+    if index is None:
+        return {"ok": True, "skipped": True, "error": "corpus not available"}
+    checked, failed, pinned = [], [], []
+    for part in getattr(circuit, "parts", []) or []:
+        ref = getattr(part, "ref", "?")
+        name = _part_model_name(part)
+        if getattr(part, "Sim_Library", None) or getattr(part, "Sim.Library", None):
+            pinned.append({"ref": ref, "name": name})
+            continue
+        if not name:
+            continue
+        hit = index.resolve(name)
+        if hit is None:
+            continue
+        res = smoke_test(name, models_dir, compat=compat)
+        entry = {"ref": ref, "name": name, "loaded": res.loaded,
+                 "converged": res.converged, "license": classify_license(hit.path, models_dir)}
+        checked.append(entry)
+        if not res.loaded:
+            entry["error"] = res.error
+            failed.append(entry)
+    return {
+        "ok": True,  # report-only, never fails the project
+        "skipped": False,
+        "vendor_models": len(checked),
+        "explicit_libraries": len(pinned),
+        "failed": failed,
+        "checked": checked,
+        "pinned": pinned,
+    }
