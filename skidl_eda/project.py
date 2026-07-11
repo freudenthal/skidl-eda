@@ -213,11 +213,29 @@ def generate(
     }
     steps = result["steps"]
 
+    def _skidl_log_errors() -> int:
+        """SKiDL's own error-record count for the phase just run (R4).
+
+        Reads the fork logger's per-phase counters (reset at each phase start)
+        so the result dict carries one reconciled number per phase -- these are
+        SKiDL *log records*, independent of the kicad-cli ERC gate.
+        """
+        try:
+            from skidl.logger import active_logger
+
+            return int(active_logger.error.count + active_logger.bare_error.count)
+        except Exception:  # noqa: BLE001 - never let logging break the loop
+            return 0
+
     # --- 1. netlist ---------------------------------------------------------
     try:
         circuit.generate_netlist(tool=KICAD10, file_=str(netlist_file))
         ok = netlist_file.exists() and netlist_file.stat().st_size > 0
-        steps["netlist"] = {"ok": ok, "file": str(netlist_file)}
+        steps["netlist"] = {
+            "ok": ok,
+            "file": str(netlist_file),
+            "skidl_log_errors": _skidl_log_errors(),
+        }
     except Exception as e:  # noqa: BLE001
         logger.error("netlist generation failed: %s", e)
         steps["netlist"] = {"ok": False, "file": str(netlist_file), "error": str(e)}
@@ -252,7 +270,11 @@ def generate(
             **render_opts,
         )
         ok = schematic_file.exists() and schematic_file.stat().st_size > 0
-        steps["schematic"] = {"ok": ok, "file": str(schematic_file)}
+        steps["schematic"] = {
+            "ok": ok,
+            "file": str(schematic_file),
+            "skidl_log_errors": _skidl_log_errors(),
+        }
     except Exception as e:  # noqa: BLE001
         logger.error("schematic generation failed: %s", e)
         steps["schematic"] = {"ok": False, "file": str(schematic_file), "error": str(e)}
