@@ -394,6 +394,18 @@ entry point and the `Sim_*` attribute spelling differ.
   BODY=1"` forces companions onto any MOSFET. Size the **deadtime** so the tank
   current swings V(sw) rail-to-rail before the opposite gate rises (too short →
   hard switching). See `canaries/llc_resonant/llc_devicelevel.py`.
+- **ZVS is load-dependent — verify it at the design's real load.** The canary's
+  ZVS-at-0.75·fr is a ~12 W result; heavier load raises the tank Q and pushes
+  the ZVS boundary **toward resonance** (a 40 W build of the same tank
+  hard-switches at ≤0.75·fr and only soft-switches from ~0.9·fr up). Losing ZVS
+  well below fr at high load is **textbook physics, not a tooling failure**, and
+  it is a current-phase (load-Q) effect — **deadtime sweeps won't fix it**;
+  move fsw toward fr or redesign the tank. Measure ZVS robustly: sample Vds
+  **just before each gate edge** on a **settled tail** of a fine `.tran`
+  (`max_time` ≪ deadtime; skip start-up cycles), and treat rail overshoot as
+  the body-diode-conduction signature of a completed resonant transition —
+  coarse or early-cycle sampling reports phantom hard switching. Reusable
+  snippet: `canaries/llc_resonant/zvs_metric.py`.
 - **Honest remaining limits (say so rather than approximating):**
   forward-converter and other single-ended isolated topologies are **not**
   simulatable yet (no forward-reset model). The half-bridge/LLC model is

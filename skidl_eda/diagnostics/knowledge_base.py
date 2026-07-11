@@ -212,6 +212,43 @@ class DebugKnowledgeBase:
                 },
             ),
             DebugPattern(
+                pattern_id=self._generate_pattern_id(["ZVS", "hard", "switching"]),
+                category="power",
+                symptoms=[
+                    "expected ZVS, measured hard switching",
+                    "hard switching below resonance",
+                    "ZVS lost at full load",
+                    "switch node not swinging rail to rail during deadtime",
+                ],
+                root_cause=(
+                    "ZVS is LOAD-dependent, not a fixed frequency band: a heavier "
+                    "load raises the tank Q and pushes the ZVS boundary toward "
+                    "resonance, so an operating point that soft-switched at light "
+                    "load hard-switches at full load (a current-phase effect -- "
+                    "textbook physics, not a tooling failure). Only after ruling "
+                    "that out: fsw too far below fr for the tank, or deadtime "
+                    "mismatched to the actual V(sw) swing time."
+                ),
+                solutions=[
+                    "Check the load first: recompute/re-simulate at the ACTUAL "
+                    "load Q -- at higher load the ZVS region shrinks toward fr "
+                    "(e.g. ~0.75*fr soft at ~12 W can hard-switch at 40 W until "
+                    "~0.9*fr); deadtime sweeps won't fix a load-Q loss",
+                    "Move fsw closer to fr (keep the tank inductive) and re-check",
+                    "Only then tune deadtime so V(sw) completes the swing before "
+                    "the opposite gate rises",
+                    "Measure Vds JUST BEFORE each gate edge on a settled tail of "
+                    "a fine .tran (see canaries/llc_resonant/zvs_metric.py) -- "
+                    "coarse or early-cycle sampling reports phantom hard switching",
+                ],
+                component_types=["MOSFET", "HALFBRIDGE", "Transformer_1P_SS"],
+                typical_measurements={
+                    "vds_at_turnon_v": 30.0,
+                    "load_w": 40,
+                    "fsw_over_fr": 0.75,
+                },
+            ),
+            DebugPattern(
                 pattern_id=self._generate_pattern_id(["USB", "enumeration", "fail"]),
                 category="digital",
                 symptoms=[

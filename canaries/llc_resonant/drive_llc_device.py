@@ -87,35 +87,28 @@ def _c8_c9() -> bool:
         stiff=True, use_initial_condition=True, initial_conditions={"VOUT": 0},
     )
     runtime = time.time() - t0
-    t = np.array(an.analysis.time)
-    sw = np.array(an.get_voltage("SW"))
-    m = t > t[-1] - 15 * per
-    t, sw = t[m], sw[m]
+    # The robust, reusable metric (Vds just before each gate edge on a settled
+    # tail; overshoot = body-diode conduction). NOTE this ZVS-at-0.75*fr result
+    # is a light-load (~12 W) one -- ZVS is load-dependent, heavier load pushes
+    # the ZVS boundary toward fr (see zvs_metric.py + the diagnostics KB).
+    from zvs_metric import measure_zvs
 
-    def at(tt):
-        return float(np.interp(tt, t, sw))
-
-    n0 = int(math.ceil(t[0] / per))
-    # HS turns on at n*per (Vds_HS = VIN - V(sw)); LS at n*per+per/2 (Vds_LS = V(sw))
-    vds_hs = np.mean([VIN - at(n * per) for n in range(n0, int(t[-1] / per))])
-    vds_ls = np.mean([at(n * per + per / 2) for n in range(n0, int(t[-1] / per))])
-    swing_hs = 1.0 - vds_hs / VIN
-    swing_ls = 1.0 - vds_ls / VIN
-    overshoot = sw.max() > VIN and sw.min() < 0.0  # both body diodes conduct
+    z = measure_zvs(an, vin=VIN, fsw=fsw, tail_cycles=15)
 
     # C8: both switches turn on with >=90% of the swing done (Vds ~ 0) + the
     # body-diode overshoot that marks a resonant (not hard) transition.
-    c8 = swing_hs >= 0.9 and swing_ls >= 0.9 and overshoot
+    sw = np.array(an.get_voltage("SW"))
+    c8 = z["zvs"]
     print(f"RESULT C8 {'PASS' if c8 else 'FAIL'} ZVS at {k:.2f}fr "
-          f"(DT={DEV.DT * 1e9:.0f}ns): HS swing={swing_hs * 100:.0f}% "
-          f"(Vds@on={vds_hs:.2f}V), LS swing={swing_ls * 100:.0f}% "
-          f"(Vds@on={vds_ls:.2f}V), overshoot[{sw.min():.2f},{sw.max():.2f}] "
-          f"body_diode={overshoot}")
+          f"(DT={DEV.DT * 1e9:.0f}ns): HS swing={z['swing_hs'] * 100:.0f}% "
+          f"(Vds@on={z['vds_hs']:.2f}V), LS swing={z['swing_ls'] * 100:.0f}% "
+          f"(Vds@on={z['vds_ls']:.2f}V), overshoot[{sw.min():.2f},{sw.max():.2f}] "
+          f"body_diode={z['overshoot']}")
 
     # C9: it converged (we have a result) with the frozen stiff recipe.
     c9 = len(sw) > 0 and np.isfinite(sw).all()
     print(f"RESULT C9 {'PASS' if c9 else 'FAIL'} device-level converged "
-          f"(stiff+UIC) in {runtime:.1f}s ({len(t)} tail pts)")
+          f"(stiff+UIC) in {runtime:.1f}s")
     return c8 and c9
 
 
