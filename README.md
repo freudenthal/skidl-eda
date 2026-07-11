@@ -160,6 +160,54 @@ from skidl_eda.sourcing import check_availability
 check_availability("C514314")   # keyless JLCPCB lookup
 ```
 
+### Use vendor SPICE models (KiCad-Spice-Library)
+
+For simulation, skidl-eda can pull real vendor models from the
+[KiCad-Spice-Library](https://github.com/kicad-spice-library/KiCad-Spice-Library)
+corpus (~50k `.model`/`.subckt` definitions). The corpus is **referenced, never
+bundled** — obtain it once (it carries heterogeneous vendor licenses):
+
+```bash
+git clone --depth 1 https://github.com/kicad-spice-library/KiCad-Spice-Library \
+  ~/.skidl/KiCad-Spice-Library
+# or: python -m skidl_eda.sourcing.find_spice_model --help   (prints the command)
+# or: python -c "from skidl_eda.sourcing import spice_library as s; s.ensure_library(install=True)"
+```
+
+It's auto-detected at `~/.skidl/KiCad-Spice-Library`, beside this repo, or via
+`SKIDL_SPICE_LIB_PATH` (pointed at the corpus `Models` dir). Search for a model
+and get a paste-ready block:
+
+```bash
+python -m skidl_eda.sourcing.find_spice_model TL072 --type opamp --verify
+# TL072  (subckt)  Manufacturer/Texas Instruments/tl072.mod   license: vendor_restricted
+#   value="TL072"   Sim_Compat="psa"
+#   Sim_Pins="<pin_+in>=1 <pin_-in>=2 <pin_V+>=3 <pin_V->=4 <pin_out>=5"
+#   # subckt nodes (assumed op-amp order): 1=+in, 2=-in, 3=V+, 4=V-, 5=out
+#   verify: LOADS + converges
+```
+
+Two ways to attach a hit:
+
+- **Auto-resolve** — set `SKIDL_SPICE_LIB_PATH` to the corpus `Models` dir, then
+  just name the part in `value`. Bare `.model` parts (most diodes/BJTs/MOSFETs)
+  need no pin mapping; a `.subckt` (op-amps/ICs) also needs `Sim_Pins` or
+  `Sim_Prefer="library"`. A curated built-in `datasheet_fit` card always wins
+  unless you set `Sim_Prefer="library"`. Provenance is recorded as `vendor_lib` /
+  source `library_index` in `sim.model_provenance[ref]`.
+- **Explicit** — paste `Sim_Library="<abs path>"` + `Sim_Name="<NAME>"`
+  (+ `Sim_Pins`), no env var needed.
+
+Always keep `Sim_Compat="psa"` for corpus models. Corpus models are real but
+**unvetted** — prefer a built-in `datasheet_fit` when one exists. Vendor-
+restricted files are fine for local simulation; only permissive files are
+auto-copied into the shared model store (`find_spice_model --into-store MPN`;
+override with `--allow-restricted`). Optional gated check:
+`generate(..., verify_models=True)` smoke-tests every corpus-resolved part.
+
+> Requires KiCad's bundled ngspice (auto-configured on Windows); the codemodels
+> needed for vendor `POLY(n)` macromodels are loaded automatically.
+
 ### Bootstrap a new project
 
 ```bash
