@@ -14,6 +14,13 @@ from .availability import (  # noqa: F401
 )
 from .find_symbol import find_footprints, find_symbols  # noqa: F401
 from .jlcsearch import search_jlcsearch  # noqa: F401
+from .spice_library import (  # noqa: F401
+    build_catalog,
+    classify_license,
+    clone_command,
+    ensure_library,
+    smoke_test,
+)
 
 __all__ = [
     "find_symbols",
@@ -22,4 +29,9 @@ __all__ = [
     "AvailabilityReport",
     "PartAvailability",
     "search_jlcsearch",
+    "ensure_library",
+    "build_catalog",
+    "classify_license",
+    "smoke_test",
+    "clone_command",
 ]
