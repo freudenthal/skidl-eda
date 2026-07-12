@@ -17,6 +17,14 @@ from ..gates.kicad_cli import KicadCliUnavailable, find_kicad_cli
 
 logger = logging.getLogger(__name__)
 
+# Default BOM columns. Beyond kicad-cli's own defaults
+# (Reference/Value/Footprint/${QUANTITY}/${DNP}) this adds the sourcing-identity
+# fields the renderer now passes through from Part kwargs (E2E A5); a field
+# absent from every symbol renders as an empty column, so this is always safe.
+DEFAULT_BOM_FIELDS = (
+    "Reference,Value,Footprint,${QUANTITY},${DNP},MPN,Manufacturer,Distributor"
+)
+
 
 def export_bom_csv(
     schematic_file,
@@ -49,8 +57,7 @@ def export_bom_csv(
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
     cmd = [cli, "sch", "export", "bom", "--output", str(output_file)]
-    if fields:
-        cmd += ["--fields", fields]
+    cmd += ["--fields", fields or DEFAULT_BOM_FIELDS]
     if labels:
         cmd += ["--labels", labels]
     if group_by:

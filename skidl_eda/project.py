@@ -124,6 +124,7 @@ def generate(
     run_drawing_connectivity: bool = True,
     drawing_must_match: bool = False,
     export_bom: bool = True,
+    bom_fields: Optional[str] = None,
     export_pdf_schematic: bool = True,
     erc_must_be_clean: bool = False,
     evaluate: bool = True,
@@ -160,6 +161,8 @@ def generate(
         drawing_must_match: if True, a drawing-vs-netlist mismatch (equiv=False)
             fails the project. Off by default (report-only).
         export_bom: export a BOM CSV.
+        bom_fields: kicad-cli ``--fields`` string; ``None`` uses
+            ``DEFAULT_BOM_FIELDS`` (adds MPN/Manufacturer/Distributor columns).
         export_pdf_schematic: export a schematic PDF.
         erc_must_be_clean: if True, remaining ERC *errors* (after any autofix)
             fail the project. Off by default: even with the PWR_FLAG autofix,
@@ -440,7 +443,8 @@ def generate(
     # --- 7. exports (skip-tolerant, non-gating) -----------------------------
     if export_bom and steps.get("schematic", {}).get("ok"):
         steps["bom"] = export_bom_csv(
-            schematic_file, project_dir / f"{project_name}_bom.csv", kicad_cli=kicad_cli
+            schematic_file, project_dir / f"{project_name}_bom.csv",
+            fields=bom_fields, kicad_cli=kicad_cli
         )
     if export_pdf_schematic and steps.get("schematic", {}).get("ok"):
         steps["pdf"] = export_pdf(

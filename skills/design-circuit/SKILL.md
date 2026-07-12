@@ -99,9 +99,12 @@ simulation, sourcing/BOM) reads it.
     prices.** No creds at all → say sourcing was not verified and move on; this
     must not block the design.
   - Attach the chosen part's identity to its `Part` as plain KiCad properties via
-    kwargs — `Part("Device", "Q", MPN="2N7000", Manufacturer="onsemi",
-    Distributor="DigiKey")`. They round-trip into the schematic (same mechanism
-    as `Sim_*`) and are auto-added as BOM columns; no schema change needed.
+    kwargs — the curated sourcing set `MPN`/`Manufacturer`/`Distributor`/
+    `DistributorPN` pass through by name, e.g. `Part("Device", "Q",
+    MPN="2N7000", Manufacturer="onsemi", Distributor="DigiKey")`. For any other
+    property use `fields={"AnyName": "val"}`. All of these become hidden schematic
+    properties and appear as BOM columns (`generate()` exports MPN/Manufacturer/
+    Distributor by default; override with `bom_fields=`); no schema change needed.
 
 ## Phase 3 — WRITE
 - Create/modify `<snake_case_name>.py`. The skidl pattern:

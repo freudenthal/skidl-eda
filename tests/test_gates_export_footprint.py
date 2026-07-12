@@ -96,6 +96,44 @@ def test_bom_export_on_canary(tmp_path):
     assert res["component_count"] >= 3  # U1, RF1, CF1 at least
 
 
+def test_default_bom_fields_include_sourcing_columns():
+    from skidl_eda.export.bom import DEFAULT_BOM_FIELDS
+
+    for col in ("MPN", "Manufacturer", "Distributor"):
+        assert col in DEFAULT_BOM_FIELDS
+
+
+def test_bom_export_header_has_mpn_column(tmp_path):
+    """A part authored with an MPN kwarg yields an MPN BOM column (E2E A5)."""
+    _kicad10_or_skip()
+    if not find_kicad_cli():
+        pytest.skip("kicad-cli not installed")
+    from skidl import KICAD10, Circuit, Net, Part
+
+    from skidl_eda.export import export_bom_csv
+
+    ckt = Circuit(name="bommpn")
+    with ckt:
+        r1 = Part("Device", "R", ref="R1", value="10k",
+                  footprint="Resistor_SMD:R_0805_2012Metric",
+                  MPN="RC0805FR-0710KL", Manufacturer="Yageo")
+        r2 = Part("Device", "R", ref="R2", value="1k",
+                  footprint="Resistor_SMD:R_0805_2012Metric")
+        Net("A").connect(r1[1], r2[1])
+        Net("0").connect(r1[2], r2[2])
+    out = str(tmp_path)
+    ckt.generate_schematic(tool=KICAD10, filepath=out, top_name="bommpn")
+    sch = os.path.join(out, "bommpn.kicad_sch")
+    csv = os.path.join(out, "bommpn_bom.csv")
+    res = export_bom_csv(sch, csv)
+    assert res["success"] is True, res
+    with open(csv, "r", encoding="utf-8", errors="replace") as f:
+        header = f.readline()
+        body = f.read()
+    assert "MPN" in header, header
+    assert "RC0805FR-0710KL" in body, body
+
+
 def test_pdf_export_on_canary(tmp_path):
     _kicad10_or_skip()
     if not find_kicad_cli():
