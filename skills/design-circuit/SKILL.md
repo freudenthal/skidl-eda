@@ -453,6 +453,39 @@ entry point and the `Sim_*` attribute spelling differ.
     sanity-check a measured f_osc against the LC estimate; a ×10+ mismatch means
     a parasitic mode, not the tank. A real winding DCR (`Sim_Params` `rp=`/`rs=`
     on the transformer) breaks the ideal-inductor tap degeneracy if you need it.
+- **Stiff vendor subckts in a high-gain DC loop (HV power MOSFETs, e.g.
+  IRF740/POWMOS.LIB).** A cold `.op` can fail *only at mid-range setpoints* of a
+  high-gain (Aol≈1e6) DC control loop while the extremes converge — it is a
+  Newton-basin problem, **not** a Vds boundary, and it surfaces (post-Phase-3) as
+  `Command 'run' failed` **with the ngspice tail attached** (look for
+  `No convergence`). Remedy: **UIC transient settle** — seed the loop nodes at 0
+  with `use_initial_condition=True`, let the loop charge a small (~10 nF) output
+  cap for ~20 ms, and average the settled tail; fall back to `.op` only at the
+  points where it converges (there it is sub-mV exact). **Never** add a large
+  "conditioning" resistor across the pass device to aid convergence — it injects
+  current and corrupts Vout (measured: 12 V → 13.3 V / 29 V with 10 MΩ / 1 MΩ).
+- **Device-level hard-switched converters with subckt MOSFETs.** Expect
+  `Timestep too small … trouble with <ref>:dmos-instance` on hard commutation
+  (now visible in the surfaced error tail). Remedy stack: an RC snubber across the
+  switch node (start ~100 Ω + 680 pF), a gate series resistor with slowed edges
+  (~200 ns), a **lower fsw**, and `stiff=True` + UIC. When `Rload·Cout ≫` the
+  runnable transient window, **seed the rail near its expected steady state** in
+  `initial_conditions` and tail-average (the HV boost repro seeds RAIL≈205 V).
+  And: **converged ≠ correct** — sanity-check the settled Vout against
+  `Vin/(1−D)`; a big snubber at high fsw burns `C·V²·f` and an over-slowed gate
+  can't turn off in a short off-time, both producing plausible-but-wrong rails.
+- **Op-amp / error-amp macromodels ignore the supply rails.** An ideal or GBW
+  op-amp is an unbounded VCVS — its output will **not** clamp at V+/V−. This is
+  useful (an error amp can legitimately drive a 200 V gate node) but surprising if
+  you expect saturation; state which you mean when reasoning about a result.
+- **Pin-name lookup returns `None` silently on an unnamed pin.** `part["OUT"]` on
+  a symbol whose output pin has an empty name (e.g.
+  `Amplifier_Operational:MCP6001R` pin 1) returns `None`, and the subsequent
+  `net += None` fails with a cryptic `TypeError … 'NoneType'`; the
+  `ERROR: No pins found using …` line just above names the part. Check pin names
+  first (`[p.name for p in part.pins]`) and wire by pin **number** when unnamed.
+- **`transient_analysis` times accept SI strings** (`step_time="5u"`,
+  `end_time="10ms"`) as well as float seconds — no need to pre-convert.
 - **Honest remaining limits (say so rather than approximating):**
   forward-converter and other single-ended isolated topologies are **not**
   simulatable yet (no forward-reset model). The half-bridge/LLC model is

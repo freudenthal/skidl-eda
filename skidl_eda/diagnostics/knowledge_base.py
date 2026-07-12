@@ -308,6 +308,68 @@ class DebugKnowledgeBase:
                 typical_measurements={"f_osc_khz": 2041, "cres_nf": 2.7},
             ),
             DebugPattern(
+                pattern_id=self._generate_pattern_id(
+                    ["operating", "point", "midrange"]),
+                category="power",
+                symptoms=[
+                    "DC operating point fails only at some setpoints",
+                    "operating point fails at mid setpoints",
+                    "op point converges at extremes but not mid-range",
+                    "No convergence in dc analysis",
+                    "Command run failed at mid setpoint",
+                ],
+                root_cause=(
+                    "A stiff vendor MOSFET subckt (e.g. IRF740/POWMOS.LIB) inside a "
+                    "high-gain (Aol~1e6) DC control loop: the Newton solver has no "
+                    "basin at mid-range setpoints even though the extremes converge. "
+                    "It is a solver-basin problem, NOT a Vds boundary or a design "
+                    "bug -- post-fix the surfaced error carries the ngspice tail "
+                    "('No convergence in dc analysis')."
+                ),
+                solutions=[
+                    "UIC transient settle: seed loop nodes at 0 with "
+                    "use_initial_condition=True, let the loop charge a small "
+                    "(~10 nF) output cap for ~20 ms, average the settled tail",
+                    "Use .op only at the setpoints where it converges (there it is "
+                    "sub-mV exact); tail-average elsewhere",
+                    "NEVER add a large conditioning resistor across the pass device "
+                    "to aid convergence -- it injects current and corrupts Vout "
+                    "(measured 12 V -> 13.3 V / 29 V with 10 MOhm / 1 MOhm)",
+                ],
+                component_types=["IRF740", "MOSFET", "subckt", "vendor_lib"],
+                typical_measurements={"aol": 1e6, "settle_ms": 20},
+            ),
+            DebugPattern(
+                pattern_id=self._generate_pattern_id(
+                    ["timestep", "dmos", "commutation"]),
+                category="power",
+                symptoms=[
+                    "timestep too small",
+                    "trouble with dmos-instance",
+                    "run aborted in switching transient",
+                    "Timestep too small; trouble with xq1:dmos-instance",
+                    "transient aborts on hard commutation",
+                ],
+                root_cause=(
+                    "A vendor MOSFET subckt's internal capacitances under hard "
+                    "commutation stall the integrator (the reason now appears in "
+                    "the surfaced ngspice error tail)."
+                ),
+                solutions=[
+                    "Add an RC snubber across the switch node (start ~100 Ohm + "
+                    "680 pF) to tame dv/dt",
+                    "Add a gate series resistor and slow the edges (~200 ns)",
+                    "Lower fsw; run transient_analysis(stiff=True, "
+                    "use_initial_condition=True)",
+                    "When Rload*Cout >> the runnable window, seed the rail near its "
+                    "expected steady state in initial_conditions and tail-average",
+                    "Sanity-check: converged != correct -- compare settled Vout "
+                    "against Vin/(1-D)",
+                ],
+                component_types=["IRF740", "MOSFET", "subckt", "boost"],
+                typical_measurements={"snubber_ohm": 100, "snubber_pf": 680},
+            ),
+            DebugPattern(
                 pattern_id=self._generate_pattern_id(["USB", "enumeration", "fail"]),
                 category="digital",
                 symptoms=[
