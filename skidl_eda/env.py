@@ -22,8 +22,11 @@ building parts.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Iterable, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 def _real_kicad10_symbol_dirs() -> List[str]:
@@ -106,6 +109,19 @@ def setup_kicad10(
         )
 
     lib_search_paths["kicad10"] = paths
+
+    # Auto-default the SPICE corpus so value="<vendor NAME>" auto-resolves out of
+    # the box in this repo (E2E A1). An already-set SKIDL_SPICE_LIB_PATH wins.
+    if not os.environ.get("SKIDL_SPICE_LIB_PATH"):
+        try:
+            from .sourcing.spice_library import default_corpus_path
+
+            corpus = default_corpus_path()
+        except Exception:  # noqa: BLE001 - discovery must never break setup
+            corpus = None
+        if corpus:
+            os.environ["SKIDL_SPICE_LIB_PATH"] = corpus
+            logger.info("SKIDL_SPICE_LIB_PATH defaulted to %s", corpus)
 
     if reset:
         import builtins

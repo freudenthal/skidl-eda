@@ -99,6 +99,30 @@ def _candidate_models_dirs(path: Optional[str]) -> List[str]:
     return out
 
 
+def default_corpus_path() -> Optional[str]:
+    """Best-effort corpus **Models** dir with NO env var and NO output.
+
+    Checks the sibling clone, the home clone, then cwd -> parents for a
+    ``KiCad-Spice-Library/Models``. Returns None if none found. This is the quiet
+    variant of :func:`ensure_library` used by ``setup_kicad10`` to
+    ``setdefault`` ``SKIDL_SPICE_LIB_PATH`` so ``value="<NAME>"`` auto-resolves
+    out of the box (E2E A1); an already-set env var always wins.
+    """
+    for root in (_sibling_root(), _home_root()):
+        md = _as_models_dir(root)
+        if md and os.path.isdir(md):
+            return md
+    cur = os.path.abspath(os.getcwd())
+    while True:
+        md = _as_models_dir(os.path.join(cur, CORPUS_REPO))
+        if md and os.path.isdir(md):
+            return md
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+
+
 def clone_command() -> str:
     return f'git clone --depth 1 {CLONE_URL} "{_home_root()}"'
 

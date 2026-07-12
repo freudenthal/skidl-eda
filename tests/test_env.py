@@ -2,6 +2,8 @@
 """Tests for skidl_eda.env -- the KiCad-10 library setup that avoids the
 bundled test_data shadow."""
 
+import os
+
 import pytest
 
 from skidl_eda import setup_kicad10
@@ -33,3 +35,45 @@ def test_kicad10_only_part_resolves():
         pytest.skip("ADA4817-1ACP not in the installed KiCad-10 libraries")
     nums = {str(pin.num) for pin in p.pins}
     assert {"1", "2", "3", "4", "5", "7", "8"}.issubset(nums)
+
+
+# --- A1: corpus auto-default -----------------------------------------------
+
+
+def test_default_corpus_path_finds_repo_corpus(tmp_path, monkeypatch):
+    """default_corpus_path() walks cwd -> parents to a KiCad-Spice-Library/Models."""
+    from skidl_eda.sourcing.spice_library import default_corpus_path
+
+    corpus = tmp_path / "KiCad-Spice-Library" / "Models"
+    corpus.mkdir(parents=True)
+    nested = tmp_path / "a" / "b"
+    nested.mkdir(parents=True)
+    monkeypatch.chdir(nested)
+    # neutralize the sibling/home short-circuits so we exercise the cwd walk
+    monkeypatch.setattr(
+        "skidl_eda.sourcing.spice_library._sibling_root", lambda: str(tmp_path / "nope"))
+    monkeypatch.setattr(
+        "skidl_eda.sourcing.spice_library._home_root", lambda: str(tmp_path / "nope2"))
+    assert default_corpus_path() == str(corpus)
+
+
+def test_setup_setdefaults_corpus_env(tmp_path, monkeypatch):
+    """setup_kicad10 sets SKIDL_SPICE_LIB_PATH when unset; an existing value wins."""
+    try:
+        setup_kicad10()  # skips below if no real KiCad-10 libs
+    except RuntimeError:
+        pytest.skip("no real KiCad-10 symbol library on this host")
+    corpus = tmp_path / "KiCad-Spice-Library" / "Models"
+    corpus.mkdir(parents=True)
+    monkeypatch.setattr(
+        "skidl_eda.sourcing.spice_library.default_corpus_path", lambda: str(corpus))
+
+    # unset -> gets defaulted
+    monkeypatch.delenv("SKIDL_SPICE_LIB_PATH", raising=False)
+    setup_kicad10()
+    assert os.environ.get("SKIDL_SPICE_LIB_PATH") == str(corpus)
+
+    # already set -> preserved
+    monkeypatch.setenv("SKIDL_SPICE_LIB_PATH", "/some/explicit/path")
+    setup_kicad10()
+    assert os.environ["SKIDL_SPICE_LIB_PATH"] == "/some/explicit/path"

@@ -2,6 +2,8 @@
 """CLI tests for skidl_eda.sourcing.find_spice_model output ergonomics (M2/M5)."""
 
 import os
+import subprocess
+import sys
 
 from skidl_eda.sourcing.find_spice_model import main
 
@@ -84,6 +86,30 @@ def test_type_mosfet_keeps_subckt_and_ranks_exact_first(capsys, monkeypatch):
     # A3: terminal identity is surfaced honestly + the IR 10/20/30 hint prints
     assert "node identity (D/G/S" in out
     assert "10=Drain 20=Gate 30=Source" in out
+
+
+def test_sourcing_package_import_is_lazy():
+    """Importing skidl_eda.sourcing must NOT eagerly pull in the CLI submodules
+    (that pre-import is what tripped the runpy RuntimeWarning, E2E C2)."""
+    code = (
+        "import sys, skidl_eda.sourcing as S;"
+        "assert 'skidl_eda.sourcing.find_symbol' not in sys.modules, 'eager import';"
+        # lazy attribute access still resolves
+        "assert callable(S.find_symbols);"
+        "print('ok')"
+    )
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "ok" in r.stdout
+
+
+def test_find_symbol_module_run_has_no_runpy_warning():
+    """python -m skidl_eda.sourcing.find_symbol must not emit the runpy
+    'found in sys.modules' RuntimeWarning (E2E C2)."""
+    r = subprocess.run(
+        [sys.executable, "-m", "skidl_eda.sourcing.find_symbol", "R"],
+        capture_output=True, text=True)
+    assert "found in sys.modules" not in r.stderr, r.stderr
 
 
 def test_type_mosfet_excluded_exact_note(capsys, monkeypatch):
