@@ -192,9 +192,16 @@ def generate(
             "hierarchical_sheet_pins": True, "power_stubs": True}`` --
             constructive placement + a deconflicted on-grid stub + local-label
             closure for every pin, so drawing == netlist by construction and
-            parts never collide. Pass ``{"deconflict_stubs": False}`` for a pure
-            A* wired render (more hand-drawn-looking, but can leave a net split
-            on a dense sheet; the self-heal then retries with deconflict).
+            parts never collide. In this mode the fork also defaults
+            ``constructive_relax=True`` -- deterministic spacing that retires the
+            force-directed refiner (power/stub cells are deconflicted in the
+            occupancy registry, so the refiner is no longer needed for
+            fusion-avoidance and its perturbation of the pin-face arrangement is
+            gone; renders are byte-identical across runs/hashseeds). Pass
+            ``{"constructive_relax": False}`` to keep the force refiner, or
+            ``{"deconflict_stubs": False}`` for a pure A* wired render (more
+            hand-drawn-looking, but can leave a net split on a dense sheet; the
+            self-heal then retries with deconflict).
         kicad_cli: explicit path to ``kicad-cli`` (else auto-discovered).
 
     Returns:
@@ -391,6 +398,68 @@ def generate(
     erc_clean, erc_hard_fail = _do_erc()
     save_hard_fail = _do_save()
     dc, drawing_hard_fail = _do_drawing()
+
+    # --- 6b-bis. constructive-relax self-heal -------------------------------
+    # constructive_relax (the fork's default in deconflict mode) retires the
+    # force-directed refiner for deterministic, arrangement-preserving spacing.
+    # On a very DENSE sheet (e.g. the 8-sheet SiPM hierarchy) its tighter placement
+    # can box the A* router in and split a net (drawing != netlist) where the force
+    # refiner's extra spread would not. Heal by re-rendering once with the refiner
+    # back on (constructive_relax=False): correctness (drawing == netlist) wins over
+    # the determinism/arrangement benefit on those sheets. Fires only when the
+    # caller did not explicitly disable relax (render_opts carries no key -> the
+    # fork defaulted it on).
+    if (
+        dc is not None
+        and dc.get("equiv") is False
+        and render_opts.get("deconflict_stubs")
+        and render_opts.get("constructive_relax", None) is not False
+    ):
+        logger.info(
+            "drawing_connectivity diverged under constructive_relax; "
+            "retrying with the force-directed refiner"
+        )
+        try:
+            # Reset the fallback-stub damage the diverged relax render left behind:
+            # its per-net A* fallback permanently stubs un-routable nets
+            # (net._stub / pin.stub), and finalize_parts_and_nets clears geometry
+            # but NOT those flags -- so the refiner re-render would inherit stale
+            # stubs and diverge again. Clear them for every non-power, non-explicit
+            # net (power nets are re-stubbed by mark_power_nets on the re-render).
+            for net in getattr(circuit, "nets", []):
+                if getattr(net, "_is_power_net", False) or getattr(
+                    net, "_stub_explicit", False
+                ):
+                    continue
+                if getattr(net, "_stub", False):
+                    net._stub = False
+                    try:
+                        for pin in net.get_pins():
+                            pin.stub = False
+                    except Exception:  # noqa: BLE001 - reset is best-effort
+                        pass
+            retry_opts = dict(render_opts)
+            retry_opts["constructive_relax"] = False
+            circuit.generate_schematic(
+                tool=KICAD10,
+                filepath=str(project_dir),
+                top_name=top_name,
+                **retry_opts,
+            )
+            ok = schematic_file.exists() and schematic_file.stat().st_size > 0
+            steps["schematic"] = {
+                "ok": ok,
+                "file": str(schematic_file),
+                "skidl_log_errors": _skidl_log_errors(),
+                "constructive_relax_fallback": True,
+            }
+            erc_clean, erc_hard_fail = _do_erc()
+            save_hard_fail = _do_save()
+            dc, drawing_hard_fail = _do_drawing()
+            if isinstance(steps.get("drawing_connectivity"), dict):
+                steps["drawing_connectivity"]["constructive_relax_fallback"] = True
+        except Exception as e:  # noqa: BLE001 - never break the loop
+            logger.warning("constructive_relax self-heal re-render failed: %s", e)
 
     # --- 6c. deconflict-stub self-heal (C6) ---------------------------------
     # A render whose wiring leaves drawing != netlist (drawing_connectivity
