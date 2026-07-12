@@ -65,3 +65,35 @@ def test_env_set_suppresses_hint(capsys, monkeypatch):
         env_lib=FIXTURES, monkeypatch=monkeypatch)
     assert rc == 0
     assert "SKIDL_SPICE_LIB_PATH is unset" not in err
+
+
+# -- A2/A4/A3: --type must not hide subckt-form HV MOSFETs ------------------ #
+
+def test_type_mosfet_keeps_subckt_and_ranks_exact_first(capsys, monkeypatch):
+    # IRFTEST is a 3-node subckt; IRFTEST01 is a VDMOS .model on the same prefix.
+    rc, out, err = _run(
+        capsys, ["IRFTEST", "--type", "mosfet", "--path", FIXTURES],
+        monkeypatch=monkeypatch)
+    assert rc == 0
+    # the subckt survives the device-type filter, tagged as unverified (A2/A4)
+    assert "IRFTEST  (subckt" in out
+    assert "type unverified" in out
+    # exact name ranks first (before the fuzzy IRFTEST01 .model hit)
+    first = out.strip().splitlines()[0]
+    assert first.startswith("IRFTEST  (")
+    # A3: terminal identity is surfaced honestly + the IR 10/20/30 hint prints
+    assert "node identity (D/G/S" in out
+    assert "10=Drain 20=Gate 30=Source" in out
+
+
+def test_type_mosfet_excluded_exact_note(capsys, monkeypatch):
+    # FIXD is a diode .model; --type mosfet should drop it but still say the
+    # exact match exists rather than silently returning a fuzzy answer (A4).
+    rc, out, err = _run(
+        capsys, ["FIXD", "--type", "mosfet", "--path", FIXTURES],
+        monkeypatch=monkeypatch)
+    # no mosfet named FIXD -> either a note (if fuzzy hits exist) or clean "none"
+    if rc == 0:
+        assert "excluded by --type mosfet" in err
+    else:
+        assert rc == 2

@@ -337,10 +337,17 @@ entry point and the `Sim_*` attribute spelling differ.
   (`value="-5"` gives −5 V) — no pin-swap trick — and an unparseable source value
   is a loud error, not a silent 1.0. Read a source's current with
   `result.get_current("V1")` by its plain schematic ref.
-- **Transient stimulus:** pass waveform parameters as `Part` kwargs (stored as
-  extra fields). `VSIN` reads `amplitude`/`frequency`/`offset`; `VPULSE` reads
-  `v1`/`v2`/`td`/`tr`/`tf`/`pw`/`per`; `VPWL` reads `points`. Keep SI suffixes
-  (`1k`/`1m`/`1u`/`1n`). Run `sim.transient_analysis(step_s, end_s)`; an optional
+- **Transient stimulus:** on a `Simulation_SPICE` source, waveform parameters
+  work **both** ways — as bare `Part` kwargs *and* as a `Sim_Params="…"` string
+  (kwargs win over `Sim_Params` when both set the same key). `VSIN` reads
+  `amplitude`/`frequency`/`offset`; `VPULSE` reads `v1`/`v2`/`td`/`tr`/`tf`/`pw`/
+  `per`; `VPWL` reads `points`. Keep SI suffixes (`1k`/`1m`/`1u`/`1n`). Both of
+  these are equivalent:
+  `Part("Simulation_SPICE","VPULSE", v1="0", v2="12", tr="200n", tf="200n", pw="9.3u", per="10u")`
+  and `Part("Simulation_SPICE","VPULSE", Sim_Params="v1=0 v2=12 tr=200n tf=200n pw=9.3u per=10u")`.
+  (Waveform-looking kwargs on a **non-source** part are ignored — the sweep is
+  scoped to `Simulation_SPICE` sources.) Run
+  `sim.transient_analysis(step_s, end_s)`; an optional
   `options={...}` (`reltol`/`abstol`/`gmin`) tunes convergence. UIC/initial
   conditions: keyword-only `use_initial_condition=True` (emit `uic`),
   `initial_conditions={"VOUT": 0}` (`.ic` node voltages, by **net name**),

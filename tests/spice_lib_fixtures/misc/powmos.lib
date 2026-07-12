@@ -1,0 +1,9 @@
+* Mini HV power-MOSFET fixture (E2E finding A2/A4/A3).
+* A bare .model VDMOS and a 3-node subckt whose names collide on a prefix,
+* mirroring the real corpus where --type mosfet hid the subckt-form HV part.
+.model IRFTEST01 VDMOS (VTO=4 KP=20)
+* IR-convention N-Channel Power MOS-FET
+*SRC=IRFTEST;IRFTEST;MOSFETs N;Power >100V;400V 10A
+.subckt IRFTEST 10 20 30
+m1 10 20 30 30 IRFTEST01
+.ends

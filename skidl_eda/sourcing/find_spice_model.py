@@ -50,6 +50,29 @@ def _role_line(hit) -> str:
     return f"  # subckt nodes (order matters): {' '.join(hit.nodes)}"
 
 
+def _subckt_terminal_lines(hit) -> list:
+    """Honest labeling of a subckt's terminals (E2E finding A3).
+
+    The tool knows the node *order* but not the node *identity* (which node is
+    Drain/Gate/Source). Echo the raw ``.subckt`` line, warn that identity is
+    unknown, and -- only as a clearly-marked heuristic -- surface the near-
+    universal IR/Intusoft ``10 20 30`` = D/G/S convention. Never auto-fills
+    Sim_Pins from the heuristic.
+    """
+    if hit.kind != "subckt" or not hit.nodes:
+        return []
+    lines = [f"  # .subckt {hit.name} {' '.join(hit.nodes)}"]
+    if len(hit.nodes) != 5:  # op-amp 5-node order is already surfaced by _role_line
+        lines.append(
+            "  # node identity (D/G/S ...) is NOT known to the tool -- verify "
+            "against the vendor header above")
+    if hit.nodes == ["10", "20", "30"]:
+        lines.append(
+            "  # heuristic: common IR/Intusoft convention is "
+            "10=Drain 20=Gate 30=Source (verify)")
+    return lines
+
+
 def _sim_pins_template(hit) -> str:
     """A Sim_Pins template mapping SYMBOL pins -> subckt nodes (user fills the
     symbol pin numbers). Only meaningful for subckts."""
@@ -62,13 +85,17 @@ def _sim_pins_template(hit) -> str:
     return f'  Sim_Pins="{parts}"'
 
 
-def _print_hit(hit, models_dir, license_tier, verify=None):
+def _print_hit(hit, models_dir, license_tier, verify=None, type_unverified=False):
     rel = hit.path
     try:
         rel = os.path.relpath(hit.path, models_dir)
     except ValueError:
         pass
     kinddt = hit.kind + (f", {hit.device_type}" if hit.device_type else "")
+    # A device-type --type filter cannot classify a subckt; say so instead of
+    # silently presenting it as a verified match (E2E finding A4).
+    if type_unverified and hit.kind == "subckt":
+        kinddt = "subckt -- type unverified; --type cannot classify subckts"
     print(f"{hit.name}  ({kinddt})  {rel}   license: {license_tier}")
     # Primary path: name-in-value auto-resolves via the index (needs
     # SKIDL_SPICE_LIB_PATH set). For subckts, auto-resolve also needs Sim_Pins.
@@ -90,6 +117,8 @@ def _print_hit(hit, models_dir, license_tier, verify=None):
     rl = _role_line(hit)
     if rl:
         print(rl)
+    for ln in _subckt_terminal_lines(hit):
+        print(ln)
     if hit.header:
         first = [ln for ln in hit.header.splitlines() if ln.strip("* ").strip()][:5]
         for ln in first:
@@ -144,10 +173,25 @@ def main(argv=None) -> int:
               + (f" (type={args.type_})" if args.type_ else ""), file=sys.stderr)
         return 2
 
+    # If a --type filter drops an exact-name definition entirely (no hit with
+    # that exact name survives), say so instead of silently ranking a fuzzy
+    # prefix hit as the answer (A4). A same-name duplicate that is merely
+    # precedence-shadowed (best-per-name) is not a filter exclusion -- skip it.
+    q = args.query.strip().lower()
+    exact_alts = index.alternates(args.query)
+    if args.type_ and exact_alts and not any(h.name.lower() == q for h in hits):
+        alt = exact_alts[0]
+        print(f"# note: exact match {alt.name!r} ({alt.kind}) was excluded by "
+              f"--type {args.type_} -- drop --type or use --type "
+              f"{'subckt' if alt.kind == 'subckt' else 'model'} to see it",
+              file=sys.stderr)
+
+    # dts set = a device-type filter that cannot classify subckts -> tag them.
+    type_unverified = bool(dts)
     for hit in hits:
         lic = SL.classify_license(hit.path, models_dir)
         verify = SL.smoke_test(hit.name, models_dir) if args.verify else None
-        _print_hit(hit, models_dir, lic, verify)
+        _print_hit(hit, models_dir, lic, verify, type_unverified=type_unverified)
 
     if args.into_store:
         top = hits[0]
