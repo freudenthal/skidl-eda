@@ -243,6 +243,16 @@ simulation, sourcing/BOM) reads it.
     symbol is pulled one grid step off its pin onto a short stub wire (the
     classic KiCad look, symbols clear of the body). Set `renderer_options=
     {"power_stubs": False}` to place symbols directly on the pin instead.
+  - **Constructive relaxation (default ON in deconflict mode, `constructive_relax`).**
+    The constructive seed + the per-sheet occupancy registry deconflict every power
+    stub and signal stub against each other, so the force-directed refiner is
+    retired on this path — placement is the pin-face constructive arrangement with
+    deterministic spacing, and the render is **byte-identical across runs and
+    `PYTHONHASHSEED`s** (no more dense-sheet placement jitter). On a very dense
+    sheet where the refiner-free placement boxes the router in and splits a net,
+    `generate` **self-heals** by re-rendering that project once with the force
+    refiner (`constructive_relax=False`), so correctness always wins. Pass
+    `renderer_options={"constructive_relax": False}` to force the refiner path.
 - **Fall back to `auto_stub` only if a dense sheet still won't clear.** At very
   high per-sheet density the A\* router may still fail; if ERC won't clear or
   `drawing_connectivity` reports `equiv=False`, pass
