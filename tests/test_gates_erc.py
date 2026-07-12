@@ -144,7 +144,19 @@ def test_erc_gate_clears_power_flags(tmp_path):
     from skidl import KICAD10
 
     c = T.sipm_tia()
-    c.generate_schematic(tool=KICAD10, filepath=str(tmp_path), top_name="SiPM_TIA")
+    # This gate exercises the ERC PWR_FLAG *autofix*, so it must start from a RAW
+    # design that still has power_pin_not_driven errors to fix. The default render
+    # now emits structural PWR_FLAGs (power_stubs) and the hierarchical interconnect,
+    # which would pre-clear the very violations under test -- so pin the legacy
+    # render here to construct the unfixed precondition.
+    c.generate_schematic(
+        tool=KICAD10,
+        filepath=str(tmp_path),
+        top_name="SiPM_TIA",
+        deconflict_stubs=False,
+        power_stubs=False,
+        hierarchical_sheet_pins=False,
+    )
     sch = os.path.join(str(tmp_path), "SiPM_TIA.kicad_sch")
 
     before = run_erc(sch)

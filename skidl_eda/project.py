@@ -268,7 +268,11 @@ def generate(
     # construction (drawing == netlist) and parts never collide, even on a dense
     # sheet. This is the proven Stage-25/25b render (0 off-grid, equivalence PASS).
     # `power_stubs` pulls power symbols one grid step off the pin; `hierarchical_
-    # sheet_pins` gives the true KiCad cross-sheet interconnect. Pure A* routing
+    # sheet_pins` gives the true KiCad cross-sheet interconnect. As of the
+    # default-renderer flip these keys now MATCH the fork's own gen_schematic
+    # defaults, so passing them here is redundant with the default -- we keep them
+    # explicit for clarity and to stay pinned if the fork default ever changes.
+    # Pure A* routing
     # (renderer_options={"deconflict_stubs": False}) yields a more hand-drawn-
     # looking wired sheet but can leave a net split on a dense sheet (the
     # drawing_connectivity gate flags it, and the self-heal retries with
