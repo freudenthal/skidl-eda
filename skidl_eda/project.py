@@ -188,10 +188,13 @@ def generate(
             from a standard KiCad install when omitted).
         renderer_options: extra kwargs forwarded to ``generate_schematic`` that
             override the defaults. The default render path is
-            ``{"seed_placement": True, "auto_stub": False}`` -- constructive
-            placement + A* wiring (a fully wired schematic). Pass
-            ``{"auto_stub": True}`` to fall back to the stub-to-labels path (the
-            clean path for dense flat sheets).
+            ``{"seed_placement": True, "deconflict_stubs": True,
+            "hierarchical_sheet_pins": True, "power_stubs": True}`` --
+            constructive placement + a deconflicted on-grid stub + local-label
+            closure for every pin, so drawing == netlist by construction and
+            parts never collide. Pass ``{"deconflict_stubs": False}`` for a pure
+            A* wired render (more hand-drawn-looking, but can leave a net split
+            on a dense sheet; the self-heal then retries with deconflict).
         kicad_cli: explicit path to ``kicad-cli`` (else auto-discovered).
 
     Returns:
@@ -250,23 +253,23 @@ def generate(
         steps["netlist"] = {"ok": False, "file": str(netlist_file), "error": str(e)}
 
     # --- 2. schematic (fork KiCad-10 renderer) ------------------------------
-    # Default render path: constructive seed placement + A* wiring (NOT auto_stub),
-    # so the harness produces a fully *wired* schematic and a new end-to-end test
-    # exercises that path first. This is the ambitious path -- at higher per-sheet
-    # density the A* router can still box a power pin in (drawing diverges from the
-    # netlist; the drawing_connectivity gate flags it) and a multi-sheet hierarchy
-    # is ERC-noisier on cross-sheet power nets. Author hierarchically (@subcircuit,
-    # ~5-15 parts/sheet) to keep each sheet routable. If a design won't come out
-    # clean on this path, fall back with renderer_options={"auto_stub": True} (stubs
-    # power/high-fanout nets to labels before routing -- the clean path for dense
-    # flat sheets). Everything here is overridable via renderer_options.
+    # Default render path: constructive seed placement + deconflicted-stub wiring.
+    # `seed_placement` places each part in the direction its connecting pin faces
+    # (constructive geometry, central part first); `deconflict_stubs` then gives
+    # EVERY remaining pin an on-grid, world-unique stub wire and closes each net
+    # with per-connected-component local labels -- so connectivity is COMPLETE by
+    # construction (drawing == netlist) and parts never collide, even on a dense
+    # sheet. This is the proven Stage-25/25b render (0 off-grid, equivalence PASS).
+    # `power_stubs` pulls power symbols one grid step off the pin; `hierarchical_
+    # sheet_pins` gives the true KiCad cross-sheet interconnect. Pure A* routing
+    # (renderer_options={"deconflict_stubs": False}) yields a more hand-drawn-
+    # looking wired sheet but can leave a net split on a dense sheet (the
+    # drawing_connectivity gate flags it, and the self-heal retries with
+    # deconflict). Everything here is overridable via renderer_options.
     render_opts = {
         "seed_placement": True,
         "auto_stub": False,
-        # True KiCad hierarchical interconnect (child hierarchical_label on the
-        # net + wired parent sheet pins) and power symbols pulled off the pin onto
-        # short stub wires -- the cleanest, most readable pass (ERC 0,
-        # drawing_connectivity matches). Both overridable via renderer_options.
+        "deconflict_stubs": True,
         "hierarchical_sheet_pins": True,
         "power_stubs": True,
     }
@@ -389,26 +392,27 @@ def generate(
     save_hard_fail = _do_save()
     dc, drawing_hard_fail = _do_drawing()
 
-    # --- 6c. auto_stub self-heal (C6) ---------------------------------------
-    # A dense flat sheet can render with the A* router leaving drawing != netlist
-    # (drawing_connectivity DIVERGES) while result["ok"] stays True -- a visually
-    # wrong schematic could ship. When that happens and the render used the
-    # default (no auto_stub), re-render once with auto_stub=True (stub high-fanout
-    # nets to labels before routing) and re-run the downstream gates. An explicit
-    # user renderer_options={"auto_stub": False} is honored: no retry.
-    user_auto_stub = (renderer_options or {}).get("auto_stub", None)
+    # --- 6c. deconflict-stub self-heal (C6) ---------------------------------
+    # A render whose wiring leaves drawing != netlist (drawing_connectivity
+    # DIVERGES) while result["ok"] stays True would ship a visually wrong sheet.
+    # The default already uses deconflict_stubs (connectivity complete by
+    # construction), so this fires only when a caller turned it OFF (e.g. a pure
+    # A* wired render) and the sheet then diverged: re-render once with
+    # deconflict_stubs=True (stub every pin + local-label closure -- the robust
+    # connectivity path, NOT auto_stub, which we measured can add part collisions
+    # and still diverge). A diverged drawing is a correctness bug (drawing !=
+    # netlist), so it heals even when the caller opted into pure A*.
     if (
         dc is not None
         and dc.get("equiv") is False
-        and not render_opts.get("auto_stub")
-        and user_auto_stub is not False
+        and not render_opts.get("deconflict_stubs")
     ):
         logger.info(
-            "drawing_connectivity diverged; retrying render with auto_stub=True"
+            "drawing_connectivity diverged; retrying render with deconflict_stubs=True"
         )
         try:
             retry_opts = dict(render_opts)
-            retry_opts["auto_stub"] = True
+            retry_opts["deconflict_stubs"] = True
             circuit.generate_schematic(
                 tool=KICAD10,
                 filepath=str(project_dir),
@@ -420,20 +424,20 @@ def generate(
                 "ok": ok,
                 "file": str(schematic_file),
                 "skidl_log_errors": _skidl_log_errors(),
-                "auto_stub_fallback": True,
+                "deconflict_fallback": True,
             }
             # Re-run the gates that depend on the schematic.
             erc_clean, erc_hard_fail = _do_erc()
             save_hard_fail = _do_save()
             dc, drawing_hard_fail = _do_drawing()
             if isinstance(steps.get("drawing_connectivity"), dict):
-                steps["drawing_connectivity"]["auto_stub_fallback"] = True
+                steps["drawing_connectivity"]["deconflict_fallback"] = True
                 if dc is not None and dc.get("equiv") is False:
                     steps["drawing_connectivity"]["hint"] = (
                         "sheet too dense - split into @subcircuit sheets"
                     )
         except Exception as e:  # noqa: BLE001 - never break the loop
-            logger.warning("auto_stub self-heal re-render failed: %s", e)
+            logger.warning("deconflict-stub self-heal re-render failed: %s", e)
 
     # gen_ok can change if the self-heal re-render failed; recompute.
     gen_ok = all(
@@ -531,7 +535,9 @@ def summarize(result: Dict[str, Any]) -> str:
         elif name == "drawing_connectivity" and not step.get("skipped"):
             equiv = step.get("equiv")
             ndiff = len(step.get("messages") or [])
-            fb = " auto_stub fallback" if step.get("auto_stub_fallback") else ""
+            fb = (" deconflict fallback" if step.get("deconflict_fallback")
+                  else " auto_stub fallback" if step.get("auto_stub_fallback")
+                  else "")
             if equiv is True:
                 extra = f" (matches netlist;{fb})" if fb else " (matches netlist)"
             elif equiv is False:

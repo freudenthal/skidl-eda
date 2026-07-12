@@ -122,14 +122,15 @@ def _force_divergence(monkeypatch, equiv_value=False):
     monkeypatch.setattr(DC, "check_drawing_connectivity", fake_check)
 
 
-def test_auto_stub_self_heal_fires_on_divergence(tmp_path, monkeypatch):
+def test_deconflict_self_heal_fires_on_divergence(tmp_path, monkeypatch):
     _kicad10_or_skip()
     if not find_kicad_cli():
         pytest.skip("kicad-cli not installed")
     import sipm_tia_skidl as T
 
-    # The connectivity gate always diverges -> the self-heal should re-render
-    # with auto_stub=True and record the fallback flag (+ hint, still diverging).
+    # A pure-A* render (deconflict off) that diverges -> the self-heal should
+    # re-render with deconflict_stubs=True and record the fallback flag (+ hint,
+    # still diverging under the forced-divergence stub).
     _force_divergence(monkeypatch, equiv_value=False)
 
     calls = []
@@ -138,21 +139,22 @@ def test_auto_stub_self_heal_fires_on_divergence(tmp_path, monkeypatch):
     orig = Circuit.generate_schematic
 
     def spy(self, *a, **k):
-        calls.append(k.get("auto_stub"))
+        calls.append(k.get("deconflict_stubs"))
         return orig(self, *a, **k)
 
     monkeypatch.setattr(Circuit, "generate_schematic", spy, raising=False)
 
     c = T.sipm_tia()
-    result = P.generate(c, "SiPM_SelfHeal", output_dir=str(tmp_path))
-    # rendered at least twice, the retry with auto_stub=True
+    result = P.generate(c, "SiPM_SelfHeal", output_dir=str(tmp_path),
+                        renderer_options={"deconflict_stubs": False})
+    # rendered at least twice, the retry with deconflict_stubs=True
     assert True in calls, calls
     dc = result["steps"]["drawing_connectivity"]
-    assert dc.get("auto_stub_fallback") is True, dc
+    assert dc.get("deconflict_fallback") is True, dc
     assert "hint" in dc, dc
 
 
-def test_auto_stub_self_heal_records_pass_on_second_render(tmp_path, monkeypatch):
+def test_deconflict_self_heal_records_pass_on_second_render(tmp_path, monkeypatch):
     _kicad10_or_skip()
     if not find_kicad_cli():
         pytest.skip("kicad-cli not installed")
@@ -170,18 +172,21 @@ def test_auto_stub_self_heal_records_pass_on_second_render(tmp_path, monkeypatch
     monkeypatch.setattr(DC, "check_drawing_connectivity", fake_check)
 
     c = T.sipm_tia()
-    result = P.generate(c, "SiPM_SelfHeal2", output_dir=str(tmp_path))
+    result = P.generate(c, "SiPM_SelfHeal2", output_dir=str(tmp_path),
+                        renderer_options={"deconflict_stubs": False})
     dc = result["steps"]["drawing_connectivity"]
-    assert dc.get("equiv") is True and dc.get("auto_stub_fallback") is True, dc
+    assert dc.get("equiv") is True and dc.get("deconflict_fallback") is True, dc
     assert "hint" not in dc, dc
 
 
-def test_explicit_auto_stub_false_suppresses_retry(tmp_path, monkeypatch):
+def test_default_deconflict_render_does_not_retry(tmp_path, monkeypatch):
     _kicad10_or_skip()
     if not find_kicad_cli():
         pytest.skip("kicad-cli not installed")
     import sipm_tia_skidl as T
 
+    # The default render already uses deconflict_stubs, so even a forced
+    # divergence must NOT trigger a second render (nothing more robust to try).
     _force_divergence(monkeypatch, equiv_value=False)
 
     calls = []
@@ -190,17 +195,14 @@ def test_explicit_auto_stub_false_suppresses_retry(tmp_path, monkeypatch):
     orig = Circuit.generate_schematic
 
     def spy(self, *a, **k):
-        calls.append(k.get("auto_stub"))
+        calls.append(k.get("deconflict_stubs"))
         return orig(self, *a, **k)
 
     monkeypatch.setattr(Circuit, "generate_schematic", spy, raising=False)
 
     c = T.sipm_tia()
-    result = P.generate(
-        c, "SiPM_NoRetry", output_dir=str(tmp_path),
-        renderer_options={"auto_stub": False},
-    )
-    # exactly one render; no auto_stub=True retry
-    assert calls == [False], calls
+    result = P.generate(c, "SiPM_NoRetry", output_dir=str(tmp_path))
+    # exactly one render (deconflict already the default); no retry
+    assert calls == [True], calls
     dc = result["steps"]["drawing_connectivity"]
-    assert not dc.get("auto_stub_fallback"), dc
+    assert not dc.get("deconflict_fallback"), dc
