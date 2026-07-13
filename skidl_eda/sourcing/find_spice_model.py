@@ -123,6 +123,13 @@ def _print_hit(hit, models_dir, license_tier, verify=None, type_unverified=False
         first = [ln for ln in hit.header.splitlines() if ln.strip("* ").strip()][:5]
         for ln in first:
             print(f"  # {ln.strip()}")
+    # Curated reliability note (A2/A3/A6): license tier doesn't predict whether a
+    # model loads or is numerically well-behaved -- surface what real runs found.
+    from .known_models import reliability_note
+
+    note = reliability_note(hit.name)
+    if note:
+        print(f"  reliability: {note}")
     if verify is not None:
         v = verify
         if getattr(v, "timed_out", False):
@@ -197,6 +204,16 @@ def main(argv=None) -> int:
         # subckt MOSFET can't eat the whole shell timeout (A4).
         verify = SL.smoke_test_bounded(hit.name, models_dir) if args.verify else None
         _print_hit(hit, models_dir, lic, verify, type_unverified=type_unverified)
+
+    # One caveat per run (A3): "LOADS + converges" is a single-device op-point
+    # check -- it does not promise transient robustness in a feedback loop.
+    if args.verify:
+        print(
+            "# verify note: 'LOADS + converges' is a single-device op-point check "
+            "only; it does NOT guarantee transient robustness with several "
+            "instances in a feedback loop (see reliability: notes above).",
+            file=sys.stderr,
+        )
 
     if args.into_store:
         top = hits[0]

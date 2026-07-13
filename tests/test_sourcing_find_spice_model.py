@@ -123,3 +123,34 @@ def test_type_mosfet_excluded_exact_note(capsys, monkeypatch):
         assert "excluded by --type mosfet" in err
     else:
         assert rc == 2
+
+
+# -- A2/A3/A6: reliability annotations -------------------------------------- #
+
+def test_reliability_note_seeded_and_prefix_and_absent():
+    from skidl_eda.sourcing.known_models import reliability_note
+
+    assert "FAILS-TO-LOAD" in (reliability_note("TLV3501") or "")
+    # corpus variant name resolves to the base entry
+    assert "STIFF" in (reliability_note("LMC6482_NS") or "")
+    assert "known-good" in (reliability_note("LT1364") or "")
+    # a model no run has touched has no invented verdict
+    assert reliability_note("SOME_RANDOM_PART_XYZ") is None
+    # a longer alnum name that merely shares a prefix must NOT match
+    assert reliability_note("LT1364XYZ") is None
+
+
+def test_verify_caveat_printed_once(capsys, monkeypatch):
+    # Avoid real ngspice: stub the bounded smoke test.
+    from skidl_eda.sourcing import spice_library as SL
+
+    monkeypatch.setattr(
+        SL, "smoke_test_bounded",
+        lambda *a, **k: SL.SmokeResult("ACMEOPA", True, True, kind="subckt"))
+    rc, out, err = _run(
+        capsys, ["ACMEOPA", "--verify", "--path", FIXTURES],
+        monkeypatch=monkeypatch)
+    assert rc == 0
+    assert "single-device op-point check" in err
+    # exactly one caveat, not one per hit
+    assert err.count("single-device op-point check") == 1
