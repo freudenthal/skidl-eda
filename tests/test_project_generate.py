@@ -179,14 +179,21 @@ def test_deconflict_self_heal_records_pass_on_second_render(tmp_path, monkeypatc
     assert "hint" not in dc, dc
 
 
-def test_default_deconflict_render_does_not_retry(tmp_path, monkeypatch):
+def test_default_deconflict_render_self_heals_via_refiner_not_deconflict(
+    tmp_path, monkeypatch
+):
     _kicad10_or_skip()
     if not find_kicad_cli():
         pytest.skip("kicad-cli not installed")
     import sipm_tia_skidl as T
 
-    # The default render already uses deconflict_stubs, so even a forced
-    # divergence must NOT trigger a second render (nothing more robust to try).
+    # The default render already uses deconflict_stubs, so on divergence the
+    # deconflict-stub self-heal (6c) has nothing to escalate to and must NOT fire.
+    # The constructive_relax self-heal (6b-bis) IS the more-robust retry: it
+    # re-renders once with the force refiner back on (constructive_relax=False,
+    # still deconflict_stubs=True). So a forced divergence yields exactly TWO
+    # renders -- both deconflict -- flagged as a constructive_relax fallback, not a
+    # deconflict fallback.
     _force_divergence(monkeypatch, equiv_value=False)
 
     calls = []
@@ -202,7 +209,9 @@ def test_default_deconflict_render_does_not_retry(tmp_path, monkeypatch):
 
     c = T.sipm_tia()
     result = P.generate(c, "SiPM_NoRetry", output_dir=str(tmp_path))
-    # exactly one render (deconflict already the default); no retry
-    assert calls == [True], calls
+    # one initial render + one refiner self-heal; both keep deconflict on.
+    assert calls == [True, True], calls
     dc = result["steps"]["drawing_connectivity"]
+    # 6b-bis fired (refiner fallback); 6c (deconflict fallback) did NOT.
+    assert dc.get("constructive_relax_fallback") is True, dc
     assert not dc.get("deconflict_fallback"), dc
