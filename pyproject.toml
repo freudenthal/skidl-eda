@@ -29,6 +29,8 @@ sim = ["PySpice>=1.5"]
 layout = ["skidl-layout>=0.1.0"]
 # Human-in-the-loop KiCad round-trip / edit / MCP interface.
 hitl = ["kicad-sch-api>=0.5.6"]
+# Vector results-report PDF (authored pages + verbatim KiCad schematic pages).
+report = ["reportlab>=4.0", "pypdf>=4.0"]
 # Optional keyed sourcing (DigiKey); keyless JLC search needs no extras.
 sourcing = ["requests>=2.28"]
 test = ["pytest>=7"]
