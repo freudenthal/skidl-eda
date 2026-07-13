@@ -398,11 +398,13 @@ entry point and the `Sim_*` attribute spelling differ.
   and `Part("Simulation_SPICE","VPULSE", Sim_Params="v1=0 v2=12 tr=200n tf=200n pw=9.3u per=10u")`.
   (Waveform-looking kwargs on a **non-source** part are ignored — the sweep is
   scoped to `Simulation_SPICE` sources.) Run
-  `sim.transient_analysis(step_s, end_s)`; an optional
+  `sim.transient_analysis(step_time, end_time, ...)` — the times are the first
+  two **positional** args (`step_s=`/`end_s=` raise `TypeError`); an optional
   `options={...}` (`reltol`/`abstol`/`gmin`) tunes convergence. UIC/initial
   conditions: keyword-only `use_initial_condition=True` (emit `uic`),
   `initial_conditions={"VOUT": 0}` (`.ic` node voltages, by **net name**),
-  `start_time`, `max_time`.
+  `start_time`, `max_time`. Read the sweep back with `res.time_array()` and
+  `res.get_voltage("NET")` (there is no `res.time` attribute).
 - **Active-device models (diodes/BJTs/MOSFETs):** naming a real part in `value`
   (`value="1N4148"`, `"2N3904"`, `"SS14"`) pulls **datasheet-fit** parameters
   when known, else a textbook-generic model; a common package/reel suffix is
