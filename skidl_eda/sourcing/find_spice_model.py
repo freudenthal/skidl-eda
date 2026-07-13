@@ -125,10 +125,13 @@ def _print_hit(hit, models_dir, license_tier, verify=None, type_unverified=False
             print(f"  # {ln.strip()}")
     if verify is not None:
         v = verify
-        status = "LOADS" if v.loaded else "FAILS-TO-LOAD"
-        conv = " + converges" if v.converged else (" (no .op convergence)" if v.loaded else "")
-        extra = f"  [{v.error}]" if v.error and not v.loaded else ""
-        print(f"  verify: {status}{conv}{extra}")
+        if getattr(v, "timed_out", False):
+            print(f"  verify: TIMEOUT  [{v.error}]")
+        else:
+            status = "LOADS" if v.loaded else "FAILS-TO-LOAD"
+            conv = " + converges" if v.converged else (" (no .op convergence)" if v.loaded else "")
+            extra = f"  [{v.error}]" if v.error and not v.loaded else ""
+            print(f"  verify: {status}{conv}{extra}")
     print()
 
 
@@ -190,7 +193,9 @@ def main(argv=None) -> int:
     type_unverified = bool(dts)
     for hit in hits:
         lic = SL.classify_license(hit.path, models_dir)
-        verify = SL.smoke_test(hit.name, models_dir) if args.verify else None
+        # Bounded verify (subprocess + timeout) so a non-converging op-point on a
+        # subckt MOSFET can't eat the whole shell timeout (A4).
+        verify = SL.smoke_test_bounded(hit.name, models_dir) if args.verify else None
         _print_hit(hit, models_dir, lic, verify, type_unverified=type_unverified)
 
     if args.into_store:
@@ -213,13 +218,17 @@ def main(argv=None) -> int:
             print(f"# could not copy into store: {exc}", file=sys.stderr)
 
     print(f"# {len(hits)} match(es) in {models_dir}", file=sys.stderr)
-    # M5: if the corpus is present but SKIDL_SPICE_LIB_PATH is unset, a bare
-    # value="<NAME>" will NOT auto-resolve in the user's next simulation.
+    # If SKIDL_SPICE_LIB_PATH is unset in this shell, note how auto-resolve is
+    # wired -- WITHOUT the old scare that it "will NOT fire in simulations"
+    # (false: skidl_eda.setup_kicad10() auto-defaults the var at build time, so
+    # every generate()/skill flow that calls it resolves value="<NAME>" already).
     if not lib_env_was_set:
         print(
-            f"note: SKIDL_SPICE_LIB_PATH is unset - value=\"<NAME>\" auto-resolve "
-            f"will NOT fire in simulations; set it to {models_dir} or use the "
-            f"explicit Sim_Library= line above.",
+            f"note: SKIDL_SPICE_LIB_PATH is unset in this shell. "
+            f"skidl_eda.setup_kicad10() auto-defaults it to the corpus at build "
+            f"time, so value=\"<NAME>\" auto-resolves in any generate()/skill flow. "
+            f"Only a bare skidl script that never calls setup_kicad10() needs to "
+            f"set it to {models_dir} (or add the explicit Sim_Library= line above).",
             file=sys.stderr,
         )
     return 0

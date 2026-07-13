@@ -85,3 +85,59 @@ def test_smoke_test_unknown_name():
     res = SL.smoke_test("NOSUCHMODEL_ZZZ", _corpus())
     assert not res.loaded
     assert "not found" in res.error
+
+
+# -- bounded verify (subprocess + timeout, A4) ----------------------------- #
+
+def test_smoke_test_bounded_timeout_verdict(monkeypatch):
+    """A subprocess timeout yields a distinct timed_out verdict, not a crash."""
+    import subprocess
+
+    def _raise(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="ngspice", timeout=k.get("timeout", 30))
+
+    monkeypatch.setattr(subprocess, "run", _raise)
+    res = SL.smoke_test_bounded("ANY", "/nonexistent", timeout_s=0.01)
+    assert res.timed_out is True
+    assert not res.loaded
+    assert "timed out" in res.error
+
+
+def test_smoke_test_bounded_parses_subprocess_result(monkeypatch):
+    """A clean subprocess run is parsed back into a SmokeResult."""
+    import json
+    import subprocess
+
+    class _CP:
+        returncode = 0
+        stdout = json.dumps(
+            {"name": "X", "loaded": True, "converged": True,
+             "kind": "subckt", "device_type": "", "path": "/x.lib", "error": ""}
+        ) + "\n"
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _CP())
+    res = SL.smoke_test_bounded("X", "/whatever")
+    assert res.loaded and res.converged and res.kind == "subckt"
+    assert res.timed_out is False
+
+
+def test_smoke_test_bounded_reports_subprocess_failure(monkeypatch):
+    import subprocess
+
+    class _CP:
+        returncode = 1
+        stdout = ""
+        stderr = "Traceback\nImportError: boom\n"
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _CP())
+    res = SL.smoke_test_bounded("X", "/whatever")
+    assert not res.loaded and "subprocess failed" in res.error
+
+
+@pytest.mark.skipif(_corpus() is None, reason="KiCad-Spice-Library corpus not present")
+def test_smoke_test_bounded_real_known_good():
+    """A real bounded verify of a known-good permissive model returns in time."""
+    res = SL.smoke_test_bounded("D1N914", _corpus(), timeout_s=60.0)
+    assert not res.timed_out
+    assert res.loaded

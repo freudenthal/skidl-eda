@@ -236,6 +236,7 @@ class SmokeResult:
     device_type: str = ""
     path: str = ""
     error: str = ""
+    timed_out: bool = False  # bounded verify hit its wall-clock limit (A4)
 
     @property
     def ok(self) -> bool:
@@ -348,6 +349,64 @@ def smoke_test(name: str, models_dir: Optional[str] = None,
     finally:
         ng_log.setLevel(prev_level)
     return res
+
+
+# A tiny driver run in a *subprocess* so a hung ngspice can be killed (A4). The
+# ngspice shared library runs in-process and cannot be interrupted by a thread
+# timeout, so isolation is the only way to bound the wall clock.
+_BOUNDED_DRIVER = (
+    "import json,sys;"
+    "from skidl_eda.sourcing.spice_library import smoke_test;"
+    "a=json.load(sys.stdin);"
+    "r=smoke_test(a['name'],a.get('models_dir'),a.get('compat','psa'));"
+    "print(json.dumps({'name':r.name,'loaded':r.loaded,'converged':r.converged,"
+    "'kind':r.kind,'device_type':r.device_type,'path':r.path,'error':r.error}))"
+)
+
+
+def smoke_test_bounded(name: str, models_dir: Optional[str] = None,
+                       compat: str = "psa",
+                       timeout_s: float = 30.0) -> SmokeResult:
+    """Like :func:`smoke_test` but killed after ``timeout_s`` seconds (A4).
+
+    Runs the smoke test in a subprocess so a model whose op-point never converges
+    (some subckt MOSFETs, e.g. ``2N7002``) can be terminated instead of eating
+    the whole shell timeout. On timeout, returns a distinct ``timed_out=True``
+    verdict rather than raising. The in-process :func:`smoke_test` is unchanged
+    (tests and internal callers that want the raw path still use it directly).
+    """
+    import json
+    import subprocess
+    import sys
+
+    payload = json.dumps({"name": name, "models_dir": models_dir, "compat": compat})
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _BOUNDED_DRIVER],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        return SmokeResult(name, False, False,
+                           error=f"verify timed out (>{timeout_s:g}s)",
+                           timed_out=True)
+    if proc.returncode != 0:
+        tail = (proc.stderr or "").strip().splitlines()[-1:] or [""]
+        return SmokeResult(name, False, False,
+                           error=f"verify subprocess failed: {tail[0][:120]}")
+    line = (proc.stdout or "").strip().splitlines()[-1:] or [""]
+    try:
+        d = json.loads(line[0])
+    except Exception:  # noqa: BLE001
+        return SmokeResult(name, False, False,
+                           error="verify: could not parse subprocess result")
+    return SmokeResult(
+        d["name"], bool(d["loaded"]), bool(d["converged"]),
+        kind=d.get("kind", ""), device_type=d.get("device_type", ""),
+        path=d.get("path", ""), error=d.get("error", ""),
+    )
 
 
 def _part_model_name(part) -> Optional[str]:
