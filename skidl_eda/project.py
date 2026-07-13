@@ -32,6 +32,7 @@ from .export.bom import export_bom_csv
 from .export.pdf import export_pdf
 from .gates.erc import AUTOFIX_TYPES, ErcUnavailable, erc_gate, run_erc
 from .gates.footprint_check import check_footprints
+from .gates.sanity import check_shorted_components, describe_finding
 from .gates.save_gate import check_save_ok
 
 logger = logging.getLogger(__name__)
@@ -258,6 +259,21 @@ def generate(
     except Exception as e:  # noqa: BLE001
         logger.error("netlist generation failed: %s", e)
         steps["netlist"] = {"ok": False, "file": str(netlist_file), "error": str(e)}
+
+    # --- 1b. design sanity (report-only WARN) -------------------------------
+    # Catch netlists that are *wrong as designed* -- shorted 2-pin passives,
+    # fully-unconnected parts, merged power rails -- which ERC and the
+    # drawing_connectivity gate are both blind to (they check the drawing, not
+    # the intent). Never affects result["ok"].
+    if steps.get("netlist", {}).get("ok"):
+        try:
+            sanity = check_shorted_components(netlist_file)
+            steps["sanity"] = sanity
+            for f in sanity.get("warnings", []):
+                logger.warning("sanity: %s", describe_finding(f))
+        except Exception as e:  # noqa: BLE001 - never let sanity break the loop
+            logger.warning("sanity check errored: %s", e)
+            steps["sanity"] = {"ok": True, "warnings": [], "info": [], "error": str(e)}
 
     # --- 2. schematic (fork KiCad-10 renderer) ------------------------------
     # Default render path: constructive seed placement + deconflicted-stub wiring.
@@ -621,6 +637,22 @@ def summarize(result: Dict[str, Any]) -> str:
                 state = "WARN"  # report-only unless drawing_must_match
             else:
                 extra = ""
+        elif name == "sanity":
+            warns = step.get("warnings") or []
+            if warns:
+                # e.g. "R8@GATE_P" for a shorted component, else the check name.
+                def _tag(f):
+                    if f.get("ref") and f.get("net"):
+                        return f"{f['ref']}@{f['net']}"
+                    if f.get("ref"):
+                        return f["ref"]
+                    return f.get("check", "?")
+                shorted = [f for f in warns if f.get("check") == "shorted_component"]
+                lead = shorted or warns
+                extra = f" ({len(warns)} finding: {', '.join(_tag(f) for f in lead[:3])})"
+                state = "WARN"
+            else:
+                state = "PASS"
         elif name == "footprint":
             extra = f" ({step.get('warnings', 0)} warn)"
         elif name == "bom" and step.get("success"):

@@ -102,6 +102,8 @@ def test_generate_full_pipeline_passes_gates(tmp_path):
 
     # save-crash gate must pass (the canary is known-clean)
     assert result["steps"]["save_gate"]["ok"], result["steps"]["save_gate"]
+    # design sanity ran and is clean on the known-good canary
+    assert result["steps"]["sanity"]["ok"] is True, result["steps"]["sanity"]
     # ERC ran (report-only); a report was produced
     assert "erc" in result["steps"]
     # exports either succeed or honestly skip
