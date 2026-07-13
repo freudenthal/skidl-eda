@@ -127,6 +127,7 @@ def generate(
     export_bom: bool = True,
     bom_fields: Optional[str] = None,
     export_pdf_schematic: bool = True,
+    sheet_images: bool = False,
     erc_must_be_clean: bool = False,
     evaluate: bool = True,
     reference_netlist: Optional[str] = None,
@@ -165,6 +166,11 @@ def generate(
         bom_fields: kicad-cli ``--fields`` string; ``None`` uses
             ``DEFAULT_BOM_FIELDS`` (adds MPN/Manufacturer/Distributor columns).
         export_pdf_schematic: export a schematic PDF.
+        sheet_images: opt-in; after the PDF, export one SVG per sheet (and
+            best-effort PNGs via cairosvg) into ``<project_dir>/sheet_images`` so
+            the drawing can be eyeballed in-loop with the ``Read`` tool. Result
+            under ``steps["sheet_images"]``. Skips cleanly if kicad-cli is absent;
+            never gates. Off by default.
         erc_must_be_clean: if True, remaining ERC *errors* (after any autofix)
             fail the project. Off by default: even with the PWR_FLAG autofix,
             deliverable designs legitimately carry design-level ERC errors
@@ -542,6 +548,12 @@ def generate(
     if export_pdf_schematic and steps.get("schematic", {}).get("ok"):
         steps["pdf"] = export_pdf(
             schematic_file, project_dir / f"{project_name}.pdf", kicad_cli=kicad_cli
+        )
+    if sheet_images and steps.get("schematic", {}).get("ok"):
+        from .export.sheet_images import export_sheet_images
+
+        steps["sheet_images"] = export_sheet_images(
+            project_dir, kicad_cli=kicad_cli
         )
 
     # --- 8. aggregate quality evaluation (report-only, never gates) ---------

@@ -647,6 +647,17 @@ entry point and the `Sim_*` attribute spelling differ.
 
 ## Phase 6 — EXAMINE & DECIDE
 - Compare each measurement to its criterion → PASS/FAIL table in `design_log.md`.
+- **Validate EVERY functional block against its own expected transfer, not just
+  the headline criteria.** A telemetry/monitor/auxiliary block that merely
+  "converges" in the sim can still be railing or oscillating (HV LLC D1: an
+  HV-monitor buffer shipped swinging ~9 Vpp instead of a ~1.3 Vpp replica because
+  its bias divider was unbypassed). Add one line of measurement per block
+  (expected vs measured) to the PASS/FAIL table — a block that isn't in the
+  headline criteria still has to do what it was drawn to do.
+- **To eyeball the drawing in-loop**, pass `generate(..., sheet_images=True)` and
+  `Read` the exported PNGs under `<project>/sheet_images/` (SVGs if no PNG
+  converter is installed). Readability stays a human call, but gross
+  placement/routing defects are visible to the agent this way.
 - **Embed the plot(s)** you saved in Phase 5: after the PASS/FAIL table, add one
   markdown image per plot — `![iter N bode](sim_plots/iterN_<name>_bode.png)` —
   followed by a one-line reading. If a plot save returned `None`, note "plot
