@@ -72,6 +72,13 @@ simulation, sourcing/BOM) reads it.
   ADA4807-2ARMZ part is MSOP-**10**. Before wiring a derived symbol, verify its
   pin count matches the package you intend (read the `.kicad_sym`, or use the MCP
   `get_component_pins`); a mismatch silently mis-maps the extra pins.
+- **A symbol name is not an MPN.** `Part("Diode", "BAT54")` fails — the library
+  carries variants (`BAT54A`/`BAT54C`/`BAT54J`…), not a bare `BAT54`. Use a
+  **generic symbol** with the MPN in `value` (`Part("Device", "D_Schottky",
+  value="BAT54")`), and read pins by **skidl introspection**
+  (`Part("Device", "D_Schottky", dest="TEMPLATE").pins`) — never by regexing the
+  `.kicad_sym` (an `(extends …)` symbol keeps its pins in the parent, so a regex
+  finds zero).
 - If the kicad-sch-api MCP server is connected (see `.mcp.json`), you can confirm
   pin numbering for unfamiliar parts with its tools — `get_component_pins`,
   `find_pins_by_name`, `find_pins_by_type`. Optional: if the server is not
@@ -309,6 +316,13 @@ every real-part design must fix them in the Python source:
 - **Exposed pads** (`EP`/`EPAD`/`PAD` pins) → connect explicitly: **GND** for
   regulators/converters, the **V− rail** for op-amps. Left floating they trip
   `pin_not_connected` / `power_pin_not_driven`.
+- **Unused symbol pins** (op-amp offset-null 1/5, IC `NC`/`OSC`, spare gates) →
+  mark each as a **deliberate no-connect**, or they throw `pin_not_connected`
+  **and** `pin_not_driven` (an Input-typed unused pin trips both). The mechanism:
+  `from skidl import NCNet` then `part[pin] += NCNet()` for each unused pin — the
+  renderer emits a KiCad `(no_connect)` flag and ERC goes clean. (A fresh
+  `NCNet()` per pin. The eval grade does **not** penalize these — intentional
+  no-connects are excluded from the floating/naming checks.)
 - **Open-collector status pins** (`PGOOD`, `/FAULT`, …) → **pull up** to a rail
   (a resistor), or add a deliberate no-connect with a note.
 - **Passive utility pins with no obvious net** (charge-pump `CP`/`C+`/`C-`,
@@ -333,6 +347,11 @@ entry point and the `Sim_*` attribute spelling differ.
   simulate(circuit)`. (circuit-synth's `circuit.simulate()` → `simulate(circuit)`.)
 - **DC / operating point:** `result = sim.operating_point()`, read values with
   `result.get_voltage("NET_NAME")` (ngspice node lookup is case-insensitive).
+  **An oscillator has no DC operating point** — `operating_point()` raises
+  `NgSpiceCommandError: Command 'run' failed` on any self-oscillating design (VCO,
+  relaxation/Royer/multivibrator). To check rails/regulation on such a design,
+  op-point an **isolated** DC block (e.g. the LDO + load alone), or transient-run
+  the full circuit and tail-average the node.
 - **AC / frequency response:** drive the input with a `Part("Simulation_SPICE",
   "VSIN", ...)` source (it carries an AC magnitude of 1 V, so the output node
   *is* the transfer function), then `result = sim.ac_analysis(start_hz, stop_hz,
@@ -344,9 +363,16 @@ entry point and the `Sim_*` attribute spelling differ.
   `Part("Simulation_SPICE", "VDC")` for a DC supply, `"VSIN"` for AC/transient
   stimulus, `"IDC"`/`"ISIN"` for current sources. Pin 1 is `+`, pin 2 is `-`. Do
   NOT use `Device:V`/`Device:I` (not real KiCad symbols). An explicit source
-  overrides the net-name rail heuristic on the nets it drives; that heuristic
-  matches **whole net-name tokens**, not substrings (so `VINT_*`/`VMID_*` are not
-  injected as a `VIN` supply). A **negative** `value` is honored directly
+  overrides the net-name rail heuristic on the nets it drives. That heuristic
+  splits a net name into **tokens on every non-alphanumeric** and injects a
+  supply if any token is a rail keyword (`VIN`/`VCC`/`VDD`/`+5V`…): so `VINT_RAW`
+  (tokens `{VINT, RAW}`) is **not** injected, but `VIN_SS` (tokens `{VIN, SS}`)
+  **is** — an underscore-delimited `VIN` counts. Two backstops keep an unwanted
+  match from silently breaking a circuit: injection is **skipped** when the net
+  is already driven by an `OUTPUT`/`PWROUT` pin (an op-amp/regulator output —
+  E2E D1), and any injection it does perform now logs at **WARNING**. Still,
+  avoid naming a signal net `V<rail>_*` if you don't want a bare rail there.
+  A **negative** `value` is honored directly
   (`value="-5"` gives −5 V) — no pin-swap trick — and an unparseable source value
   is a loud error, not a silent 1.0. Read a source's current with
   `result.get_current("V1")` by its plain schematic ref.
@@ -488,6 +514,15 @@ entry point and the `Sim_*` attribute spelling differ.
   op-amp is an unbounded VCVS — its output will **not** clamp at V+/V−. This is
   useful (an error amp can legitimately drive a 200 V gate node) but surprising if
   you expect saturation; state which you mean when reasoning about a result.
+- **Rail-range pre-flight for VENDOR op-amp subckts (they DO saturate).** Unlike
+  the ideal/GBW default above, a real vendor `.subckt` op-amp clamps near its
+  rails faithfully — so **check the chosen part's output swing at your actual rail
+  before committing to a single-supply topology**. Example that cost an E2E
+  iteration: `LT1364` is **not** rail-to-rail; on a 3.3 V single supply its output
+  window is only ~1.2–2.1 V, which silently clamps a mid-rail summer and kills a
+  VCO. If the swing is tight, plan a **bipolar core** (VREF = GND) or pick a
+  rail-to-rail part rated for the supply. The sim is right; the part choice was
+  the bug.
 - **Pin-name lookup returns `None` silently on an unnamed pin.** `part["OUT"]` on
   a symbol whose output pin has an empty name (e.g.
   `Amplifier_Operational:MCP6001R` pin 1) returns `None`, and the subsequent
@@ -515,6 +550,9 @@ entry point and the `Sim_*` attribute spelling differ.
   Encrypted vendor models (`.enc`) can't be used by ngspice. (KiCad's bundled
   ngspice codemodels — incl. `spice2poly.cm`, needed for the `POLY(n)` sources in
   most vendor op-amp/IC macromodels — are now loaded automatically.)
+  **Benign noise:** `unrecognized parameter (iave) - ignored` / `(vpk) - ignored`
+  on corpus diode `.model` cards is harmless PSpice-dialect chatter — ngspice
+  drops the PSpice-only params and the model still loads. Not a load failure.
 - **Vendor model library (KiCad-Spice-Library, ~50k models).** When you need a
   real part whose model isn't a built-in `datasheet_fit` card, search the corpus
   instead of guessing params:
@@ -526,7 +564,14 @@ entry point and the `Sim_*` attribute spelling differ.
   left-hand `<pinN>` are placeholders for YOUR symbol's pin **numbers** (replace
   them; keep the right-hand node values verbatim). A wrong `Sim_Pins` now raises
   a clear Python error naming your symbol's pins and the subckt's nodes (no more
-  cryptic ngspice "Too few parameters"). Two ways to use a hit:
+  cryptic ngspice "Too few parameters"). **Worked example** — the LT1364 subckt
+  is `.subckt LT1364 3 2 7 4 6` (`+in −in V+ V− out`). On the
+  `Amplifier_Operational:TL071` host symbol (whose pins are 3=+in, 2=−in, 7=V+,
+  4=V−, 6=out) the map is the **identity** `Sim_Pins="3=3 2=2 7=7 4=4 6=6"` —
+  left = your symbol's pin number, right = the subckt node in that same slot. A
+  non-identity case: `LMV7219` nodes are `22 6 1 2 18`, so on a 5-pin comparator
+  symbol the map is `Sim_Pins="<+in>=22 <−in>=6 <V+>=1 <V−>=2 <out>=18"` (fill the
+  left with your symbol's pin numbers). Two ways to use a hit:
   * **Auto-resolve (simplest):** set `SKIDL_SPICE_LIB_PATH` to the corpus
     `Models` dir (once), then just name the part in `value` (or `Sim_Name`).
     Bare `.model` parts (most diodes/BJTs/MOSFETs) resolve with no pin mapping;
@@ -538,7 +583,14 @@ entry point and the `Sim_*` attribute spelling differ.
     `Sim_Name="<NAME>"` (+ `Sim_Pins`) block the CLI emits.
   Always keep `Sim_Compat="psa"` for corpus models. Corpus models are real but
   **unvetted** — prefer a built-in `datasheet_fit` when one exists, and treat a
-  `library_index` provenance as "vendor model, self-verify". **The license tier
+  `library_index` provenance as "vendor model, self-verify". **`--verify`'s
+  "LOADS + converges" is a single-device op-point check only** — it does **not**
+  promise transient robustness with several instances in a feedback loop (a
+  CMOS-input macromodel like `LMC6482` passes verify yet timestep-collapses with 4
+  instances in an oscillator core). The CLI now prints a curated `reliability:`
+  line for models real runs have exercised — heed it over the license tier when
+  choosing a part; for an oscillator/loop core prefer a bipolar-input op-amp
+  (e.g. `LT1364`). **The license tier
   is advisory metadata only** — a `vendor_restricted` model still loads and
   simulates normally; you own redistribution-terms compliance (only
   `--into-store` gates on it). **No built-in zener card exists** — for a zener

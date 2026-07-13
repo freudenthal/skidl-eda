@@ -557,6 +557,68 @@ class DebugKnowledgeBase:
                 component_types=["Op-Amp", "ADA4807", "Amplifier_Operational"],
                 typical_measurements={"peaking_db": 6.0, "gbw_hz": 180e6},
             ),
+            DebugPattern(
+                pattern_id=self._generate_pattern_id(
+                    ["timestep", "collapse", "mosfet", "instance", "macromodel", "loop"]
+                ),
+                category="simulation",
+                symptoms=[
+                    "Timestep too small mosfet-instance macromodel",
+                    "trouble with mosfet-instance m.x in op-amp macromodel",
+                    "transient timestep collapse with several op-amp instances",
+                    "CMOS op-amp macromodel will not converge in a feedback loop",
+                    "verify said LOADS + converges but transient collapses",
+                ],
+                root_cause=(
+                    "A numerically stiff CMOS (CMOS-input) op-amp/comparator "
+                    "macromodel: its internal MOSFETs won't converge in a "
+                    "multi-instance transient feedback loop even with stiff=True + "
+                    "UIC. A single-device op-point verify does not predict this."
+                ),
+                solutions=[
+                    "Swap to a bipolar-input vendor model (LT1364-class) for the "
+                    "oscillator/loop core -- the E2E fix",
+                    "Reduce the number of instances of the stiff part",
+                    "Move to bipolar supply rails so the model biases in-range",
+                    "Heed the CLI reliability: note (find_spice_model) over the "
+                    "license tier when choosing the part",
+                ],
+                component_types=[
+                    "Op-Amp",
+                    "LMC6482",
+                    "Comparator",
+                    "Amplifier_Operational",
+                ],
+                typical_measurements={"instances": 4.0},
+            ),
+            DebugPattern(
+                pattern_id=self._generate_pattern_id(
+                    ["eval", "grade", "dropped", "noconnect", "floating", "erc"]
+                ),
+                category="evaluation",
+                symptoms=[
+                    "eval grade dropped after adding no-connect flags",
+                    "quality grade fell while ERC went clean",
+                    "no_floating penalizes NCNet no-connect pins",
+                    "naming check flags intentional no-connect nets",
+                ],
+                root_cause=(
+                    "Pre-fix false positive: an intentional NCNet no-connect "
+                    "exports as a single-pin auto-named net, which the floating and "
+                    "naming quality checks counted against the grade even though "
+                    "the pin carries a KiCad (no_connect) flag (E2E B2)."
+                ),
+                solutions=[
+                    "Upgrade skidl-eda: generate()/evaluate_circuit now derive "
+                    "nc_nets from the live Circuit and exclude them from both checks",
+                    "If calling evaluate_netlist directly, pass "
+                    "nc_nets=nc_net_names(circuit)",
+                    "Confirm the grade returns to its pre-no-connect value (FuncGen "
+                    "83.8 -> 96.2)",
+                ],
+                component_types=["Op-Amp", "IC", "Amplifier_Operational"],
+                typical_measurements={"grade_before": 83.8, "grade_after": 96.2},
+            ),
         ]
 
         for pattern in default_patterns:
