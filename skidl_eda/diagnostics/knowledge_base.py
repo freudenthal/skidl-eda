@@ -593,6 +593,87 @@ class DebugKnowledgeBase:
             ),
             DebugPattern(
                 pattern_id=self._generate_pattern_id(
+                    ["driver", "output", "never", "switches", "threshold", "uvlo"]
+                ),
+                category="power",
+                symptoms=[
+                    "driver output never switches though input stimulus toggles",
+                    "driver/IC output never switches",
+                    "gate driver output stuck though PWM input toggles",
+                    "behavioral driver subckt idle with a toggling input",
+                    "half-bridge not switching, driver input toggling",
+                    "verify said LOADS + converges but the driver output is dead",
+                ],
+                root_cause=(
+                    "A behavioral driver/controller subckt's input never crosses "
+                    "the model's switching threshold, or an enable/UVLO condition "
+                    "is unmet: the input node toggles but the (often "
+                    "VCC-independent, model-specific ~5 V) logic threshold is above "
+                    "the stimulus, VCC is below the model's UVLO, or an enable/SD "
+                    "pin is not asserted. A single-device --verify (load + "
+                    "op-point) cannot see any of these (HV LLC E2E: IR2104 ~5 V "
+                    "threshold vs a 3.3 V drive)."
+                ),
+                solutions=[
+                    "Op-point the driver in an ISOLATED harness and probe the "
+                    "input node vs the model's documented logic threshold; sweep "
+                    "input amplitude to find where the output starts switching",
+                    "Level-shift the logic input up to the model's threshold (a "
+                    "2N7000 common-source inverter turns a 3.3 V swing into 0/12 V)",
+                    "Raise VCC above the model's UVLO; assert the enable/SD pin",
+                    "De-risk any vendor driver/controller subckt with its REAL "
+                    "stimulus amplitude BEFORE building the full design -- "
+                    "find_spice_model --verify does not check thresholds",
+                ],
+                component_types=[
+                    "IR2104", "Driver_FET", "MOSFET", "HALFBRIDGE", "subckt"
+                ],
+                typical_measurements={
+                    "input_threshold_v": 5.0, "logic_swing_v": 3.3
+                },
+            ),
+            DebugPattern(
+                pattern_id=self._generate_pattern_id(
+                    ["opamp", "buffer", "rails", "oscillates", "switching",
+                     "converter"]
+                ),
+                category="analog",
+                symptoms=[
+                    "op-amp buffer output rails/oscillates near a switching "
+                    "converter",
+                    "monitor buffer railing instead of tracking",
+                    "telemetry buffer output swings far beyond its expected "
+                    "replica",
+                    "aux buffer oscillating on an HV divider tap",
+                    "buffer output clips both rails though input is small",
+                ],
+                root_cause=(
+                    "An op-amp buffer on an unbypassed reference/bias divider next "
+                    "to a switching converter: switching ripple on the divider "
+                    "couples into +in, a high-Z tap node couples to a fast dv/dt "
+                    "net, and a buffer bandwidth far larger than needed amplifies "
+                    "it -- so the buffer rails/oscillates rather than tracking (HV "
+                    "LLC E2E D1: a 70 MHz buffer on an unbypassed 6 V divider swung "
+                    "~9 Vpp instead of a ~1.3 Vpp replica)."
+                ),
+                solutions=[
+                    "Bypass the reference/bias divider (>=100 nF) so switching "
+                    "ripple is not injected into +in",
+                    "Add feedback roll-off (a small C across the feedback, or an "
+                    "RC on +in) so the buffer bandwidth is no larger than needed",
+                    "Pick a GBW no larger than the telemetry bandwidth requires",
+                    "Test: probe the bias-node ripple, then re-check the buffer "
+                    "with the divider replaced by an ideal source",
+                ],
+                component_types=[
+                    "Op-Amp", "LT1364", "Amplifier_Operational", "Buffer"
+                ],
+                typical_measurements={
+                    "expected_swing_vpp": 1.3, "measured_swing_vpp": 9.1
+                },
+            ),
+            DebugPattern(
+                pattern_id=self._generate_pattern_id(
                     ["eval", "grade", "dropped", "noconnect", "floating", "erc"]
                 ),
                 category="evaluation",

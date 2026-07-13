@@ -32,6 +32,13 @@ _KNOWN = {
               "Terminal identity is NOT tool-known -- verify D/G/S against the "
               "vendor header; the IR heuristic is 10=D 20=G 30=S",
     "MUR160": "loads from vendor_lib (used as the HV boost rectifier)",
+    # --- gate driver (HV LLC resonator E2E 2026-07-13) ---
+    "IR2104": "behavioral half-bridge driver subckt: input logic threshold ~5 V "
+              "(VCC-independent internal ref) -- a 3.3 V logic source will NOT "
+              "switch it, level-shift to >=5 V (e.g. a 2N7000 inverter). Collapses "
+              "under whole-circuit use_initial_condition; op-point start (no uic) "
+              "converges. Subckt node order != KiCad symbol pin order -- map "
+              "Sim_Pins by NAME (find_spice_model --symbol Driver_FET:IR2104)",
     # --- power MOSFET (ZVS driver E2E 2026-07-11) ---
     "IRFP250N": "VDMOS: loads + conducts once terminals resolve by pin NAME "
                 "(position-mapping came out gate/drain-swapped = a dead device); "

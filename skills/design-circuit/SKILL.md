@@ -92,6 +92,18 @@ simulation, sourcing/BOM) reads it.
   **Zeners have no built-in card** — for a gate/rail clamp search `--type zener`
   (permissive corpus hits exist, e.g. `DI_1N4742A`) or use a generic diode with
   `Sim_Params="BV=<Vz>"`.
+- **De-risk a vendor driver/controller/IC subckt in an isolated harness FIRST.**
+  Before committing a design to a behavioral driver/controller subckt, build the
+  smallest isolated harness that drives it with the design's **real** stimulus
+  (amplitude, rails) and confirm the outputs actually toggle/regulate. `--verify`
+  is a single-device load + op-point check — it **cannot see logic thresholds,
+  UVLO, or an unasserted enable**. Worked example (HV LLC resonator E2E): the
+  `IR2104` half-bridge driver has a ~5 V VCC-independent logic threshold, so a
+  3.3 V PWM never switched it — caught only by an isolated `_drv_test.py` harness,
+  and fixed with a 2N7000 level-shift inverter. When a subckt's node order differs
+  from your symbol's pin numbering, map `Sim_Pins` by **name** with
+  `find_spice_model "<NAME>" --symbol <Lib:Sym>`. Budget one iteration for this
+  harness; it is far cheaper than debugging a dead full design.
 - **Sourcing / availability (OPTIONAL — only when the user asks for real parts,
   a BOM, or sourcing, or supplies MPNs).** Check real stock/price with
   `skidl_eda.sourcing.check_availability("<query>")`. **JLCPCB works without any

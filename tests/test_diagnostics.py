@@ -68,6 +68,31 @@ def test_diagnose_cmrr_symptom_matches():
     assert any("match" in s.lower() for s in dx.best.solutions)
 
 
+def test_diagnose_driver_never_switches_matches():
+    """HV LLC S3: a behavioral driver whose output never toggles maps to the
+    threshold/UVLO/enable pattern with the level-shift + de-risk fixes."""
+    dx = D.diagnose(
+        ["driver output never switches though input stimulus toggles"])
+    assert dx.best is not None, dx.summary()
+    assert any(
+        kw in dx.best.root_cause.lower()
+        for kw in ("threshold", "uvlo", "enable")
+    )
+    assert any("level-shift" in s.lower() or "isolated harness" in s.lower()
+               for s in dx.best.solutions)
+
+
+def test_diagnose_aux_buffer_rails_matches():
+    """HV LLC D1: an aux/monitor buffer railing near a switching converter maps
+    to the unbypassed-divider / roll-off pattern."""
+    dx = D.diagnose(
+        ["op-amp buffer output rails/oscillates near a switching converter"])
+    assert dx.best is not None, dx.summary()
+    assert dx.best.category == "analog"
+    assert any("bypass" in s.lower() or "roll-off" in s.lower()
+               for s in dx.best.solutions)
+
+
 def test_diagnose_unknown_symptoms_is_empty_not_error():
     dx = D.diagnose(["banana coloured smoke", "quantum flux"])
     assert dx.matches == [] and dx.best is None
