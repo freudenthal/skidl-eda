@@ -445,6 +445,17 @@ entry point and the `Sim_*` attribute spelling differ.
   for a resonant start seed `initial_conditions={"VOUT": 0}`) and keep
   `max_time ≤ per/50` (per = 1/fsw) so switch edges aren't aliased. If a switch
   node still won't converge, add an RC snubber across it or shorten `end_time`.
+- **UIC is for SELF-OSCILLATING circuits — not for a DRIVEN converter.** A driven
+  converter (external gate/PWM stimulus — a gate-driven half-bridge, not a
+  self-oscillator) *has* a valid DC operating point, so **start from it (no
+  `use_initial_condition`)**. Vendor behavioral driver/controller subckts (internal
+  `.ic` caps + ABM `VALUE{}` nodes) can **collapse at t≈0 under a whole-circuit
+  `uic`** (`Timestep too small; time≈2e-10 … trouble with node "xu1.md1_5"`) even
+  though the op-point start converges instantly. The surfaced error now carries a
+  `HINT:` pointing this out. Arrange start-up in the *stimulus* instead (e.g. start
+  the PWM in the state that pre-charges the bootstrap cap), not with UIC. Reserve
+  `use_initial_condition` for symmetric self-oscillating cores (Royer/Mazzilli),
+  which genuinely have no DC point (see the self-oscillating bullet below).
 - **Device-level switches (power MOSFETs).** For higher fidelity than the
   HALFBRIDGE macromodel — real Coss + body-diode reverse conduction, so ZVS is
   visible — build the bridge from two MOSFETs. Name a curated power part in
