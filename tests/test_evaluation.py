@@ -19,14 +19,19 @@ if CANARY not in sys.path:
 from skidl_eda import evaluation as E  # noqa: E402
 from skidl_eda.evaluation.quality_score import (  # noqa: E402
     check_decoupling,
+    check_naming,
     check_no_floating,
     check_power_connectivity,
 )
 from skidl_eda.evaluation.spec import CircuitSpec  # noqa: E402
 
 
-def _spec(components, nets):
-    return CircuitSpec(components=components, nets={k: set(v) for k, v in nets.items()})
+def _spec(components, nets, nc_nets=None):
+    return CircuitSpec(
+        components=components,
+        nets={k: set(v) for k, v in nets.items()},
+        nc_nets=set(nc_nets or ()),
+    )
 
 
 # ---- spec classification ---------------------------------------------------
@@ -64,6 +69,39 @@ def test_check_no_floating():
     bad = _spec({"R1": {}}, {"DANGLE": {("R1", "1")}})
     c = check_no_floating(bad)
     assert c.score == 0.0 and "floating" in c.issues[0]
+
+
+def test_check_no_floating_excludes_intentional_nc_nets():
+    # An op-amp with a real 2-pin net plus an unused pin tied to a no-connect
+    # (single-pin net N$1). With N$1 marked as an intentional no-connect, the
+    # floating check is clean (E2E finding B2); without it, N$1 counts as floating.
+    nets = {
+        "OUT": {("U1", "6"), ("R1", "1")},  # real driven net
+        "N$1": {("U1", "1")},               # unused pin -> NCNet no-connect
+    }
+    with_nc = _spec({"U1": {}, "R1": {}}, nets, nc_nets={"N$1"})
+    c = check_no_floating(with_nc)
+    assert c.score == 1.0 and not c.issues
+    # a genuinely floating pin (not marked NC) still scores < 1.0
+    without_nc = _spec({"U1": {}, "R1": {}}, nets)
+    c2 = check_no_floating(without_nc)
+    assert c2.score < 1.0 and any("N$1" in m for m in c2.issues)
+
+
+def test_check_naming_excludes_intentional_nc_nets():
+    # N$1 is an intentional no-connect -> not a naming defect; N$2 is a real but
+    # unnamed internal net -> legitimately penalized.
+    nets = {
+        "SIG": {("R1", "1"), ("R2", "1")},   # named, real
+        "N$1": {("U1", "1")},                # NC no-connect (auto-name by design)
+        "N$2": {("R2", "2"), ("R3", "1")},   # real unnamed internal net
+    }
+    spec = _spec({"U1": {}, "R1": {}, "R2": {}, "R3": {}}, nets, nc_nets={"N$1"})
+    c = check_naming(spec)
+    # only N$2 counts as auto-named (N$1 excluded); SIG + N$2 = 2 real nets scored
+    assert any("N$2" in m for m in c.issues)
+    assert not any("N$1" in m for m in c.issues)
+    assert 0.0 < c.score < 1.0
 
 
 def test_check_decoupling_rewards_bypass_cap():
@@ -125,6 +163,15 @@ def test_evaluate_netlist_file(tmp_path):
     rep = E.evaluate_netlist(n)
     assert rep["components"] == 2 and rep["nets"] == 3
     assert 0.0 <= rep["grade"] <= 100.0
+
+
+def test_evaluate_netlist_nc_nets_raises_grade(tmp_path):
+    # VIN is single-pin in _NETLIST; excluding it as an intentional no-connect
+    # removes both the floating and the naming penalties -> higher grade (B2).
+    n = tmp_path / "n.net"; n.write_text(_NETLIST, encoding="utf-8")
+    base = E.evaluate_netlist(n)
+    excluded = E.evaluate_netlist(n, nc_nets={"VIN"})
+    assert excluded["grade"] >= base["grade"]
 
 
 # ---- integration: the canary + oracle self-test ----------------------------

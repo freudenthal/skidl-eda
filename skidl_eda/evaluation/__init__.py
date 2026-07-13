@@ -18,6 +18,7 @@ from .judge import (  # noqa: F401
     evaluate_circuit,
     evaluate_netlist,
     evaluate_schematic,
+    nc_net_names,
     summarize,
 )
 from .quality_score import Check, ScoreReport, quality_score  # noqa: F401
@@ -34,5 +35,6 @@ __all__ = [
     "evaluate_netlist",
     "evaluate_schematic",
     "evaluate_circuit",
+    "nc_net_names",
     "summarize",
 ]

@@ -548,8 +548,13 @@ def generate(
     if evaluate and steps.get("netlist", {}).get("ok"):
         try:
             from .evaluation import evaluate_netlist
+            from .evaluation.judge import nc_net_names
 
-            report = evaluate_netlist(netlist_file, reference=reference_netlist)
+            report = evaluate_netlist(
+                netlist_file,
+                reference=reference_netlist,
+                nc_nets=nc_net_names(circuit),
+            )
             result["evaluation"] = report
             steps["evaluation"] = {
                 "ok": True,

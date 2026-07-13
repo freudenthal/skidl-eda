@@ -46,6 +46,12 @@ def is_pseudo(ref: str) -> bool:
 class CircuitSpec:
     components: Dict[str, Dict[str, str]] = field(default_factory=dict)
     nets: Dict[str, Set[Pin]] = field(default_factory=dict)
+    # Net names that are *intentional* no-connects (single-pin by design -- an
+    # unused symbol pin tied to a skidl ``NCNet``). A plain KiCad netlist has no
+    # no-connect marker, so these must be supplied by the caller from the live
+    # ``Circuit`` (E2E finding B2); ``check_no_floating`` excludes them so doing
+    # the ERC-correct thing (adding no-connect flags) no longer lowers the grade.
+    nc_nets: Set[str] = field(default_factory=set)
 
     # ---- construction -----------------------------------------------------
     @classmethod

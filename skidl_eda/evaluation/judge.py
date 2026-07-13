@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from .quality_score import quality_score
 from .reference_oracle import score_against_reference
@@ -20,9 +20,14 @@ from .spec import CircuitSpec
 
 
 def _judge_report(
-    netlist_path: Path, reference: Optional[str], check_footprint: bool
+    netlist_path: Path,
+    reference: Optional[str],
+    check_footprint: bool,
+    nc_nets: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
     spec = CircuitSpec.from_netlist_file(netlist_path)
+    if nc_nets:
+        spec.nc_nets = set(nc_nets)
     qs = quality_score(spec)
     report: Dict[str, Any] = {
         "grade": qs.grade,
@@ -43,10 +48,17 @@ def _judge_report(
 
 
 def evaluate_netlist(
-    netlist_path, reference: Optional[str] = None, *, check_footprint: bool = True
+    netlist_path,
+    reference: Optional[str] = None,
+    *,
+    check_footprint: bool = True,
+    nc_nets: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
-    """Score an existing ``.net`` file (optionally against a golden netlist)."""
-    return _judge_report(Path(netlist_path), reference, check_footprint)
+    """Score an existing ``.net`` file (optionally against a golden netlist).
+
+    ``nc_nets`` -- net names that are intentional no-connects (from the live
+    ``Circuit``); excluded from the floating-pin check (B2)."""
+    return _judge_report(Path(netlist_path), reference, check_footprint, nc_nets)
 
 
 def evaluate_schematic(
@@ -55,11 +67,13 @@ def evaluate_schematic(
     *,
     kicad_cli: Optional[str] = None,
     check_footprint: bool = True,
+    nc_nets: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
     """Export a netlist from ``schematic_path`` via kicad-cli, then score it.
 
     Raises :class:`~skidl_eda.gates.kicad_cli.KicadCliUnavailable` if kicad-cli
-    is missing (callers decide whether to skip).
+    is missing (callers decide whether to skip). ``nc_nets`` -- intentional
+    no-connect net names to exclude from the floating-pin check (B2).
     """
     from ..gates.erc import _export_netlist
     from ..gates.kicad_cli import require_kicad_cli
@@ -70,24 +84,43 @@ def evaluate_schematic(
         out = tmp / "eval.net"
         if not _export_netlist(cli, Path(schematic_path), out):
             raise RuntimeError("netlist export failed")
-        return _judge_report(out, reference, check_footprint)
+        return _judge_report(out, reference, check_footprint, nc_nets)
     finally:
         import shutil
 
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def nc_net_names(circuit) -> set:
+    """Collect the names of a built circuit's intentional no-connect nets.
+
+    An unused symbol pin flagged with skidl ``NCNet`` exports as a single-pin
+    net; its ``.name`` matches the exported KiCad netlist name (both derive from
+    the same net object), so name-based exclusion in the floating check is exact.
+    Returns an empty set on any failure (evaluation must never break generation).
+    """
+    try:
+        from skidl.net import NCNet
+
+        return {n.name for n in circuit.nets if isinstance(n, NCNet) and n.name}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
 def evaluate_circuit(
     circuit, reference: Optional[str] = None, *, check_footprint: bool = True
 ) -> Dict[str, Any]:
-    """Generate a netlist from a built skidl ``Circuit`` and score it."""
+    """Generate a netlist from a built skidl ``Circuit`` and score it.
+
+    No-connect nets are derived from the live circuit and excluded from the
+    floating-pin check (B2)."""
     from skidl import KICAD10
 
     tmp = Path(tempfile.mkdtemp(prefix="ska_evalc_"))
     try:
         out = tmp / "eval.net"
         circuit.generate_netlist(tool=KICAD10, file_=str(out))
-        return _judge_report(out, reference, check_footprint)
+        return _judge_report(out, reference, check_footprint, nc_net_names(circuit))
     finally:
         import shutil
 

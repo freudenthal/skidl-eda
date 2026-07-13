@@ -65,10 +65,16 @@ def check_power_connectivity(spec: CircuitSpec) -> Check:
 
 
 def check_no_floating(spec: CircuitSpec) -> Check:
-    """No real-component pin should sit on a single-pin (floating) net."""
+    """No real-component pin should sit on a single-pin (floating) net.
+
+    Nets the caller marked as intentional no-connects (``spec.nc_nets`` -- an
+    unused symbol pin flagged with skidl ``NCNet``) are excluded: they are
+    single-pin *by design* and carry a KiCad ``(no_connect)`` flag, so counting
+    them as floating would penalize the ERC-correct thing (E2E finding B2)."""
     real_nets = {
         n: {(r, p) for r, p in pins if not is_pseudo(r)}
         for n, pins in spec.nets.items()
+        if n not in spec.nc_nets
     }
     real_nets = {n: pins for n, pins in real_nets.items() if pins}
     floating = [n for n, pins in real_nets.items() if len(pins) < 2]
@@ -118,9 +124,15 @@ def check_decoupling(spec: CircuitSpec) -> Check:
 
 
 def check_naming(spec: CircuitSpec) -> Check:
-    """Nets should be meaningfully named -- penalize auto/unconnected names."""
+    """Nets should be meaningfully named -- penalize auto/unconnected names.
+
+    Intentional no-connect nets (``spec.nc_nets``) are excluded: an unused pin's
+    ``NCNet`` is auto-named ``N$k`` *by design* -- there is nothing to name, so
+    counting it as an auto-named defect is a false positive (E2E finding B2)."""
     real_nets = [
-        n for n, pins in spec.nets.items() if any(not is_pseudo(r) for r, _ in pins)
+        n
+        for n, pins in spec.nets.items()
+        if n not in spec.nc_nets and any(not is_pseudo(r) for r, _ in pins)
     ]
     if not real_nets:
         return Check("naming", 1.0, 1.0, detail="(no nets)")
