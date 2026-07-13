@@ -140,6 +140,89 @@ def test_reliability_note_seeded_and_prefix_and_absent():
     assert reliability_note("LT1364XYZ") is None
 
 
+# -- S1: named-node Sim_Pins template + --symbol name-match ----------------- #
+
+class _Hit:
+    """Minimal stand-in for a SpiceHit (only .kind/.nodes/.name are read)."""
+
+    def __init__(self, kind, nodes, name="X"):
+        self.kind = kind
+        self.nodes = nodes
+        self.name = name
+
+
+def test_sim_pins_template_named_nodes_keyed_by_name_and_warns():
+    from skidl_eda.sourcing.find_spice_model import (
+        _sim_pins_template, _subckt_node_mode)
+
+    hit = _Hit("subckt", ["VCC", "IN", "SD", "com", "VB", "HO", "VS", "LO"])
+    assert _subckt_node_mode(hit) == "named"
+    tmpl = _sim_pins_template(hit)
+    # tokens keyed by node name, not positional <pinN>
+    assert "<yourpin_VCC>=VCC" in tmpl and "<yourpin_LO>=LO" in tmpl
+    assert "<pin1>" not in tmpl and "<pin5>" not in tmpl
+    # the explicit ordering warning is present
+    assert "WARNING" in tmpl and "need NOT match" in tmpl
+
+
+def test_sim_pins_template_numeric_nodes_positional():
+    from skidl_eda.sourcing.find_spice_model import (
+        _sim_pins_template, _subckt_node_mode)
+
+    hit = _Hit("subckt", ["1", "2", "3"])  # all-numeric, not 5-node
+    assert _subckt_node_mode(hit) == "numeric"
+    tmpl = _sim_pins_template(hit)
+    assert "<pin1>=1" in tmpl and "<pin3>=3" in tmpl
+    assert "yourpin" not in tmpl and "WARNING" not in tmpl
+
+
+def test_sim_pins_template_5node_opamp_heuristic_unchanged():
+    from skidl_eda.sourcing.find_spice_model import (
+        _sim_pins_template, _subckt_node_mode)
+
+    hit = _Hit("subckt", ["3", "2", "7", "4", "6"])  # LT1364-style 5-node op-amp
+    assert _subckt_node_mode(hit) == "opamp5"
+    tmpl = _sim_pins_template(hit)
+    assert "<pin_+in>=3" in tmpl and "<pin_out>=6" in tmpl
+    assert "yourpin" not in tmpl
+
+
+def test_symbol_name_match_full_mapping():
+    from skidl_eda.sourcing.find_spice_model import (
+        _match_symbol_pins_to_nodes, _symbol_mapped_sim_pins)
+
+    # IR2104: symbol pin names (with ~{SD} overbar, COM uppercase) vs subckt nodes
+    pins = {"1": "VCC", "2": "IN", "3": "~{SD}", "4": "COM",
+            "5": "LO", "6": "VS", "7": "HO", "8": "VB"}
+    nodes = ["VCC", "IN", "SD", "com", "VB", "HO", "VS", "LO"]
+    mapping, unmatched = _match_symbol_pins_to_nodes(pins, nodes)
+    assert unmatched == []
+    line, un = _symbol_mapped_sim_pins(pins, nodes)
+    assert un == []
+    # paste-ready, ascending pin order -- ~{SD}->SD and COM->com matched
+    assert line == 'Sim_Pins="1=VCC 2=IN 3=SD 4=com 5=LO 6=VS 7=HO 8=VB"'
+
+
+def test_symbol_name_match_partial_leaves_placeholder():
+    from skidl_eda.sourcing.find_spice_model import _symbol_mapped_sim_pins
+
+    pins = {"1": "VCC", "2": "IN"}
+    nodes = ["VCC", "IN", "MYSTERY"]
+    line, unmatched = _symbol_mapped_sim_pins(pins, nodes)
+    assert unmatched == ["MYSTERY"]
+    assert "1=VCC" in line and "2=IN" in line
+    assert "<yourpin_MYSTERY>=MYSTERY" in line
+
+
+def test_subckt_hit_prints_derisk_caution(capsys, monkeypatch):
+    """Every subckt hit carries the S3 de-risk caution (behavioral-model warning)."""
+    rc, out, err = _run(
+        capsys, ["ACMEOPA", "--path", FIXTURES], monkeypatch=monkeypatch)
+    assert rc == 0
+    assert "behavioral subckt" in out
+    assert "de-risk in an isolated harness" in out
+
+
 def test_verify_caveat_printed_once(capsys, monkeypatch):
     # Avoid real ngspice: stub the bounded smoke test.
     from skidl_eda.sourcing import spice_library as SL

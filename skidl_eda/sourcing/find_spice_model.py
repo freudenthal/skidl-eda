@@ -41,6 +41,107 @@ _TYPE_ALIASES = {
 _OPAMP5_ROLES = ["+in", "-in", "V+", "V-", "out"]
 
 
+def _norm_pin_token(s) -> str:
+    """Normalize a symbol pin name or subckt node for name-matching (S1).
+
+    Strips the KiCad overbar wrapper ``~{...}`` / bare ``~``, a leading ``/``,
+    underscores and surrounding whitespace, then casefolds -- so ``~{SD}``,
+    ``SD`` and ``sd`` all compare equal, and ``COM`` matches node ``com``.
+    """
+    s = str(s or "").strip()
+    s = s.replace("~{", "").replace("}", "").replace("~", "")
+    s = s.lstrip("/").replace("_", "").strip()
+    return s.casefold()
+
+
+def _match_symbol_pins_to_nodes(pin_name_by_num, subckt_nodes):
+    """Match KiCad symbol pins (``{num: name}``) to subckt node names by NAME.
+
+    Returns ``(mapping, unmatched)`` where ``mapping`` is ``{node: pin_number}``
+    for every node whose (normalized) name matches exactly one symbol pin, and
+    ``unmatched`` is the list of nodes with zero or ambiguous (>1) matches.
+    Pure/testable -- no skidl import.
+    """
+    norm_to_pins = {}
+    for num, name in pin_name_by_num.items():
+        norm_to_pins.setdefault(_norm_pin_token(name), []).append(str(num))
+    mapping, unmatched = {}, []
+    for node in subckt_nodes:
+        cands = norm_to_pins.get(_norm_pin_token(node), [])
+        if len(cands) == 1:
+            mapping[node] = cands[0]
+        else:
+            unmatched.append(node)
+    return mapping, unmatched
+
+
+def _pin_num_sort_key(num):
+    """Sort symbol pin numbers numerically when possible, else lexically."""
+    s = str(num)
+    return (0, int(s), "") if s.isdigit() else (1, 0, s)
+
+
+def _symbol_mapped_sim_pins(pin_name_by_num, subckt_nodes):
+    """Build a ``Sim_Pins="..."`` line from a name-match; ``(line, unmatched)``.
+
+    Matched nodes become ``<pinnum>=<node>`` in ascending symbol-pin order (how a
+    person reads a symbol; ``token order is irrelevant to the converter``);
+    unmatched nodes keep the ``<yourpin_NODE>=<node>`` placeholder in node order
+    so the line is obviously partial.
+    """
+    mapping, unmatched = _match_symbol_pins_to_nodes(pin_name_by_num, subckt_nodes)
+    matched = sorted(mapping.items(), key=lambda kv: _pin_num_sort_key(kv[1]))
+    toks = [f"{pin}={node}" for node, pin in matched]
+    toks += [f"<yourpin_{n}>={n}" for n in unmatched]
+    return 'Sim_Pins="' + " ".join(toks) + '"', unmatched
+
+
+def _load_symbol_pins(symbol_id):
+    """``{pin number: pin name}`` for a KiCad symbol ``Lib:Name`` (needs skidl).
+
+    Returns ``None`` (and prints a stderr note) on any failure -- an unbound
+    corpus, a bad id, or a missing symbol -- so ``--symbol`` degrades to the
+    name-keyed template rather than crashing the CLI.
+    """
+    lib, sep, name = str(symbol_id).partition(":")
+    if not sep or not lib or not name:
+        print(f"# --symbol: expected 'Lib:Name', got {symbol_id!r}", file=sys.stderr)
+        return None
+    try:
+        from skidl_eda import setup_kicad10
+
+        setup_kicad10()
+        from skidl import TEMPLATE, Part
+
+        part = Part(lib, name, dest=TEMPLATE)
+        return {str(p.num): (p.name or "") for p in part.pins}
+    except Exception as exc:  # noqa: BLE001 - any load failure -> graceful skip
+        print(f"# --symbol: could not load {symbol_id!r} ({exc}); showing the "
+              f"name-keyed template instead", file=sys.stderr)
+        return None
+
+
+def _subckt_node_mode(hit) -> str:
+    """Classify how to template a subckt's ``Sim_Pins`` (S1):
+
+    * ``opamp5`` -- a 5-node subckt: the near-universal PSpice op-amp positional
+      role order (kept as the historical heuristic);
+    * ``named`` -- node identifiers contain letters (``VCC IN SD com VB HO VS
+      LO``): key tokens by node NAME so a positional paste can't silently
+      cross-wire when symbol pin order != subckt node order;
+    * ``numeric`` -- an all-numeric node list (``3 2 7 4 6``): positional
+      ``<pinN>`` is the only available convention;
+    * ``none`` -- not a subckt / no nodes.
+    """
+    if hit.kind != "subckt" or not hit.nodes:
+        return "none"
+    if len(hit.nodes) == 5:
+        return "opamp5"
+    if any(any(c.isalpha() for c in n) for n in hit.nodes):
+        return "named"
+    return "numeric"
+
+
 def _role_line(hit) -> str:
     if hit.kind != "subckt" or not hit.nodes:
         return ""
@@ -75,17 +176,36 @@ def _subckt_terminal_lines(hit) -> list:
 
 def _sim_pins_template(hit) -> str:
     """A Sim_Pins template mapping SYMBOL pins -> subckt nodes (user fills the
-    symbol pin numbers). Only meaningful for subckts."""
-    if hit.kind != "subckt" or not hit.nodes:
+    symbol pin numbers). Only meaningful for subckts.
+
+    For a subckt whose nodes have *named* identifiers (S1) the token keys are the
+    node names (``<yourpin_VCC>=VCC ...``) with an explicit warning, because the
+    subckt's node ORDER need not match the symbol's pin numbering -- a positional
+    ``<pinN>`` paste would silently cross-wire drivers/ICs. Numeric node lists
+    keep the positional ``<pinN>`` form (the only convention available), and the
+    5-node op-amp role heuristic is unchanged.
+    """
+    mode = _subckt_node_mode(hit)
+    if mode == "none":
         return ""
-    if len(hit.nodes) == 5:
+    if mode == "opamp5":
         parts = " ".join(f"<pin_{r}>={n}" for n, r in zip(hit.nodes, _OPAMP5_ROLES))
-    else:
-        parts = " ".join(f"<pin{i+1}>={n}" for i, n in enumerate(hit.nodes))
+        return f'  Sim_Pins="{parts}"'
+    if mode == "named":
+        parts = " ".join(f"<yourpin_{n}>={n}" for n in hit.nodes)
+        return (
+            f'  Sim_Pins="{parts}"\n'
+            "  # WARNING: subckt node order need NOT match your symbol's pin "
+            "numbering --\n"
+            "  # fill each <yourpin_NODE> with the symbol pin NUMBER that carries "
+            "that NODE's role."
+        )
+    parts = " ".join(f"<pin{i+1}>={n}" for i, n in enumerate(hit.nodes))
     return f'  Sim_Pins="{parts}"'
 
 
-def _print_hit(hit, models_dir, license_tier, verify=None, type_unverified=False):
+def _print_hit(hit, models_dir, license_tier, verify=None, type_unverified=False,
+               symbol_pins=None, symbol_id=None):
     rel = hit.path
     try:
         rel = os.path.relpath(hit.path, models_dir)
@@ -105,12 +225,30 @@ def _print_hit(hit, models_dir, license_tier, verify=None, type_unverified=False
     else:
         print(f'  value="{hit.name}"   Sim_Compat="psa"')
         print(_sim_pins_template(hit))
-        # The Sim_Pins block is NOT paste-ready: the left-hand <pinN> tokens are
-        # placeholders for YOUR symbol's pins (E2E finding M2).
-        print("  # ^ Sim_Pins maps YOUR symbol's pins to these subckt nodes: "
-              "replace each")
-        print("  #   <pinN> with your KiCad symbol's pin NUMBER; keep the node")
-        print("  #   values (right of '=') verbatim.")
+        # The Sim_Pins block is NOT paste-ready: the left-hand tokens are
+        # placeholders for YOUR symbol's pins (E2E finding M2). For named nodes
+        # (S1) the tokens are keyed by node name and the ordering warning is
+        # already printed by the template above.
+        if _subckt_node_mode(hit) == "named":
+            print("  # ^ each <yourpin_NODE> = your KiCad symbol's pin NUMBER whose "
+                  "NAME/role is")
+            print("  #   that node; keep the node values verbatim. Pass "
+                  "--symbol LIB:NAME to")
+            print("  #   auto-fill this mapping by matching pin names to node names.")
+        else:
+            print("  # ^ Sim_Pins maps YOUR symbol's pins to these subckt nodes: "
+                  "replace each")
+            print("  #   <pinN> with your KiCad symbol's pin NUMBER; keep the node")
+            print("  #   values (right of '=') verbatim.")
+        # --symbol LIB:NAME -> a concrete, name-matched Sim_Pins line (S1).
+        if symbol_pins and hit.nodes:
+            line, unmatched = _symbol_mapped_sim_pins(symbol_pins, hit.nodes)
+            tag = "PASTE-READY" if not unmatched else "PARTIAL"
+            print(f"  # --symbol {symbol_id} name-match -> {tag}:")
+            print(f"  {line}")
+            if unmatched:
+                print("  #   unmatched nodes (fill the <yourpin_*> placeholders by "
+                      f"hand): {' '.join(unmatched)}")
     # Explicit alternative (always works, no env var needed):
     print(f'  # explicit: Sim_Library="{os.path.abspath(hit.path)}" '
           f'Sim_Name="{hit.name}"')
@@ -130,6 +268,15 @@ def _print_hit(hit, models_dir, license_tier, verify=None, type_unverified=False
     note = reliability_note(hit.name)
     if note:
         print(f"  reliability: {note}")
+    # A behavioral subckt can LOAD + op-point-converge and still be non-functional
+    # in-circuit (logic-input threshold above your stimulus, UVLO, unasserted
+    # enable) -- none of which --verify can see (S3). Caution once per subckt hit.
+    if hit.kind == "subckt":
+        print("  # behavioral subckt: --verify checks load+op-point only. Logic "
+              "thresholds,")
+        print("  #   UVLO and drive levels are model-specific -- de-risk in an "
+              "isolated harness")
+        print("  #   with YOUR real stimulus amplitude before building around it.")
     if verify is not None:
         v = verify
         if getattr(v, "timed_out", False):
@@ -156,6 +303,10 @@ def main(argv=None) -> int:
                          "(so value=MPN resolves with no env var)")
     ap.add_argument("--allow-restricted", action="store_true",
                     help="allow --into-store to copy a vendor-restricted file")
+    ap.add_argument("--symbol", metavar="LIB:NAME",
+                    help="KiCad symbol id (e.g. Driver_FET:IR2104) -- match its "
+                         "pin NAMES to each subckt's node names and print a "
+                         "concrete, paste-ready Sim_Pins line")
     ap.add_argument("--path", help="explicit corpus path (repo root or Models dir)")
     ap.add_argument("--rebuild", action="store_true",
                     help="force a full re-index of the corpus")
@@ -196,6 +347,10 @@ def main(argv=None) -> int:
               f"{'subckt' if alt.kind == 'subckt' else 'model'} to see it",
               file=sys.stderr)
 
+    # --symbol: load the symbol's pins once (name-match is per-hit, since each
+    # subckt has its own node order). None on any failure -> template-only.
+    symbol_pins = _load_symbol_pins(args.symbol) if args.symbol else None
+
     # dts set = a device-type filter that cannot classify subckts -> tag them.
     type_unverified = bool(dts)
     for hit in hits:
@@ -203,7 +358,8 @@ def main(argv=None) -> int:
         # Bounded verify (subprocess + timeout) so a non-converging op-point on a
         # subckt MOSFET can't eat the whole shell timeout (A4).
         verify = SL.smoke_test_bounded(hit.name, models_dir) if args.verify else None
-        _print_hit(hit, models_dir, lic, verify, type_unverified=type_unverified)
+        _print_hit(hit, models_dir, lic, verify, type_unverified=type_unverified,
+                   symbol_pins=symbol_pins, symbol_id=args.symbol)
 
     # One caveat per run (A3): "LOADS + converges" is a single-device op-point
     # check -- it does not promise transient robustness in a feedback loop.
