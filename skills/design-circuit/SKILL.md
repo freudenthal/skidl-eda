@@ -419,6 +419,32 @@ entry point and the `Sim_*` attribute spelling differ.
   bandwidth-/stability-sensitive design (e.g. a TIA with a large source cap) add
   `Sim_Gbw="1.4G"` to opt into a single-pole GBW-limited macromodel — then the
   Rf·Cf pole, source capacitance, and finite loop bandwidth interact.
+- **Digital / mixed-signal — what simulates and what does NOT (a *class* rule,
+  not a parts list).** ngspice-in-KiCad runs *analog* only. **Simulatable:** any
+  analog logic you build from transistors/op-amps (a BJT/MOSFET inverter, a
+  combinational op-amp comparator), and the behavioral primitives below.
+  **NOT simulatable:** the corpus's *digital* models — XSPICE `d_*` primitives
+  (e.g. a `74HC74` whose body is `a… d_dff`; they are digital event nodes needing
+  adc/dac bridges the sim layer can't inject) and PSpice `U`/`ugate`/`IO_*`
+  devices (e.g. most `cmos.lib`/`4000`-series; ngspice doesn't implement them).
+  `find_spice_model` now prints a **`simulatable: no (…class…)`** line for these
+  (and a `--simulatable-only` filter), and `simulate()` raises a clear
+  class-named error if one is wired in — so you learn *before* building around it,
+  not after a dead run. Don't reach for a corpus flip-flop/gate; use ↓.
+- **Behavioral logic (DFF / TFF / DLATCH / gates)** give a corpus-independent,
+  ngspice-native digital path — exactly as `Sim_Device="LDO"/"BUCK"` give a
+  behavioral power block. Put `Sim_Device="DFF"` (or `"TFF"`, `"DLATCH"`,
+  `"AND"/"OR"/"NAND"/"NOR"/"XOR"/"XNOR"/"NOT"`) on an ordinary logic symbol.
+  Terminals resolve by pin **name** (`CLK`/`C`, `D`, `Q`, `~Q`, `EN`); a symbol
+  whose pins are unnamed (many gate symbols are generic `~`) takes an explicit
+  `Sim_Pins="3=Y 1=A 2=B"` (pin **number** = role). `Sim_Params="vdd=5 tpd=10n"`
+  sets the logic swing / threshold (or `vih=`/`vil=`) / propagation delay. Levels
+  are analog voltages (HIGH above `vdd/2`); flip-flop memory is a switch-held cap
+  (a behavioral master-slave latch — no XSPICE). A ÷2 divider is one DFF with
+  `~Q`→`D`; run a **seeded stiff transient**
+  (`transient_analysis(stiff=True, use_initial_condition=True)`) so it starts from
+  a defined state. Worked example: `canaries/dff_divider/`. Limitations: async
+  set/reset and real fan-out/drive-strength are not modeled.
 - **Linear regulators / LDOs** (`Regulator_Linear:*`, or any part with
   `Sim_Device="LDO"`) simulate as a datasheet-parameterized behavioral
   macromodel. Give it `Sim_Params="vout=3.3 vdrop=0.3 rser=0.1 iq=2m"` (only
@@ -548,6 +574,22 @@ entry point and the `Sim_*` attribute spelling differ.
   VCO. If the swing is tight, plan a **bipolar core** (VREF = GND) or pick a
   rail-to-rail part rated for the supply. The sim is right; the part choice was
   the bug.
+- **A non-rail-to-rail comparator/op-amp also fails to *drive a logic-level FET*
+  (not just op-amp saturation).** A comparator that swings only ±2 V on ±3.3
+  rails sits *below* a logic-level MOSFET's Vgs(th) (~2.1 V for a 2N7000), so the
+  switch barely turns on and the stage silently hangs (an E2E sawtooth VCO
+  charged to one crossing and stopped — no error, just a dead DC-ish state). For
+  a reset/discharge switch or gate drive at low rails, prefer a **BJT** (needs
+  only ~0.7 V Vbe), and make the comparator a **Schmitt** (positive feedback) so
+  it latches through the transition.
+- **Inject a summing-amp offset as a *current into the virtual-ground junction*,
+  not as a divider tap feeding the summer input resistor.** A resistor-divider
+  node has real Thévenin impedance; the summer's input resistor pulling toward
+  virtual ground *loads* it and the intended offset arrives **halved** — a
+  converged-but-wrong result no gate catches (an E2E phase sweep came out as
+  non-monotonic garbage from a +0.59 V offset that measured +0.32 V). Use a
+  single resistor from the rail (or a `Simulation_SPICE` source) **straight into
+  the `−` input node**; it is immune to loading.
 - **Pin-name lookup returns `None` silently on an unnamed pin.** `part["OUT"]` on
   a symbol whose output pin has an empty name (e.g.
   `Amplifier_Operational:MCP6001R` pin 1) returns `None`, and the subsequent
@@ -556,6 +598,10 @@ entry point and the `Sim_*` attribute spelling differ.
   first (`[p.name for p in part.pins]`) and wire by pin **number** when unnamed.
 - **`transient_analysis` times accept SI strings** (`step_time="5u"`,
   `end_time="10ms"`) as well as float seconds — no need to pre-convert.
+- **Big multi-op-amp transient *sweeps* take minutes per point** — a 14-op-amp
+  oscillator over hundreds of µs is ~20–60 s/point, so a tuning + phase sweep runs
+  10+ minutes. Run sweeps in the **background** with a wait-loop rather than
+  blocking the loop; expect it and budget for it.
 - **Honest remaining limits (say so rather than approximating):**
   forward-converter and other single-ended isolated topologies are **not**
   simulatable yet (no forward-reset model). The half-bridge/LLC model is
@@ -593,8 +639,10 @@ entry point and the `Sim_*` attribute spelling differ.
   is `.subckt LT1364 3 2 7 4 6` (`+in −in V+ V− out`). On the
   `Amplifier_Operational:TL071` host symbol (whose pins are 3=+in, 2=−in, 7=V+,
   4=V−, 6=out) the map is the **identity** `Sim_Pins="3=3 2=2 7=7 4=4 6=6"` —
-  left = your symbol's pin number, right = the subckt node in that same slot. A
-  non-identity case: `LMV7219` nodes are `22 6 1 2 18`, so on a 5-pin comparator
+  left = your symbol's pin number, right = the subckt node in that same slot.
+  **The map is the identity ONLY when your symbol's pin numbers happen to coincide
+  with the subckt's node order** — never assume it; read both and map role-by-role.
+  A non-identity case: `LMV7219` nodes are `22 6 1 2 18`, so on a 5-pin comparator
   symbol the map is `Sim_Pins="<+in>=22 <−in>=6 <V+>=1 <V−>=2 <out>=18"` (fill the
   left with your symbol's pin numbers). Two ways to use a hit:
   * **Auto-resolve (simplest):** set `SKIDL_SPICE_LIB_PATH` to the corpus
@@ -605,7 +653,12 @@ entry point and the `Sim_*` attribute spelling differ.
     `Sim_Prefer="library"`. The tier is recorded as `vendor_lib` / source
     `library_index` in `sim.model_provenance[ref]`.
   * **Explicit (no env var):** paste the `Sim_Library="<abs path>"` +
-    `Sim_Name="<NAME>"` (+ `Sim_Pins`) block the CLI emits.
+    `Sim_Name="<NAME>"` (+ `Sim_Pins`) block the CLI emits. **Prefer auto-resolve
+    for anything you commit** — a hardcoded absolute `Sim_Library` path is a
+    different-checkout landmine (the shipped `func_gen.py` once pinned a dead
+    `circ-synth/…` path and failed to simulate in its own repo). A stale absolute
+    path now WARNS and falls back to corpus auto-resolve by name rather than
+    hard-failing, but the portable form is `value="<NAME>"` (drop the path).
   Always keep `Sim_Compat="psa"` for corpus models. Corpus models are real but
   **unvetted** — prefer a built-in `datasheet_fit` when one exists, and treat a
   `library_index` provenance as "vendor model, self-verify". **`--verify`'s

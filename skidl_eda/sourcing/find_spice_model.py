@@ -204,6 +204,20 @@ def _sim_pins_template(hit) -> str:
     return f'  Sim_Pins="{parts}"'
 
 
+def _hit_simulatability(hit):
+    """Classify a hit's model body (dialect + simulatable verdict), or None.
+
+    Delegates to the shared, part-agnostic classifier in ``skidl.sim``. Never
+    raises: a classification failure returns None (the CLI just omits the line).
+    """
+    try:
+        from skidl.sim.simulatability import classify_model_file
+
+        return classify_model_file(hit.path, hit.name)
+    except Exception:
+        return None
+
+
 def _print_hit(hit, models_dir, license_tier, verify=None, type_unverified=False,
                symbol_pins=None, symbol_id=None):
     rel = hit.path
@@ -268,6 +282,18 @@ def _print_hit(hit, models_dir, license_tier, verify=None, type_unverified=False
     note = reliability_note(hit.name)
     if note:
         print(f"  reliability: {note}")
+    # Simulatability verdict (A1): a model can be a real corpus part and still be
+    # a class ngspice-in-KiCad cannot run (XSPICE digital, PSpice U-device,
+    # encrypted). Classify the body (never the name) and say so up front, so a
+    # digital flip-flop isn't discovered to be un-runnable only after wiring it in.
+    mc = _hit_simulatability(hit)
+    if mc is not None:
+        if mc.simulatable == "no":
+            print(f"  simulatable: NO ({mc.dialect}) -- {mc.reason}")
+        elif mc.simulatable == "unknown":
+            print(f"  simulatable: unknown ({mc.dialect}) -- {mc.reason}")
+        else:
+            print(f"  simulatable: yes ({mc.dialect})")
     # A behavioral subckt can LOAD + op-point-converge and still be non-functional
     # in-circuit (logic-input threshold above your stimulus, UVLO, unasserted
     # enable) -- none of which --verify can see (S3). Caution once per subckt hit.
@@ -298,6 +324,9 @@ def main(argv=None) -> int:
     ap.add_argument("--limit", type=int, default=20, help="max results (default 20)")
     ap.add_argument("--verify", action="store_true",
                     help="smoke-test each shown model against ngspice")
+    ap.add_argument("--simulatable-only", action="store_true",
+                    help="hide hits whose model class ngspice cannot run "
+                         "(XSPICE digital, PSpice U-device, encrypted)")
     ap.add_argument("--into-store", metavar="MPN",
                     help="copy the top permissive hit into the model store as MPN "
                          "(so value=MPN resolves with no env var)")
@@ -353,6 +382,25 @@ def main(argv=None) -> int:
 
     # dts set = a device-type filter that cannot classify subckts -> tag them.
     type_unverified = bool(dts)
+    # --simulatable-only: drop hits whose class ngspice cannot run (A1). A
+    # verdict of "unknown" is kept (it may well run); only a hard "no" is hidden.
+    if args.simulatable_only:
+        kept = []
+        hidden = 0
+        for hit in hits:
+            mc = _hit_simulatability(hit)
+            if mc is not None and mc.simulatable == "no":
+                hidden += 1
+                continue
+            kept.append(hit)
+        if hidden:
+            print(f"# --simulatable-only: hid {hidden} un-runnable hit(s) "
+                  f"(XSPICE/PSpice digital or encrypted)", file=sys.stderr)
+        hits = kept
+        if not hits:
+            print(f"# no simulatable models matching {args.query!r}"
+                  + (f" (type={args.type_})" if args.type_ else ""), file=sys.stderr)
+            return 2
     for hit in hits:
         lic = SL.classify_license(hit.path, models_dir)
         # Bounded verify (subprocess + timeout) so a non-converging op-point on a

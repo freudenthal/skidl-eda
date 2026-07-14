@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -112,6 +113,77 @@ def _write_project_file(project_file: Path) -> None:
     project_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+_SHEETFILE_RE = re.compile(r'\(property\s+"Sheetfile"\s+"([^"]+)"', re.IGNORECASE)
+
+
+def _referenced_sheet_files(top_schematic: Path) -> set:
+    """Set of child ``.kicad_sch`` filenames the hierarchy references.
+
+    BFS from the top sheet through every ``(property "Sheetfile" "...")`` entry
+    (a nested hierarchy references children through intermediate sheets), so the
+    orphan check is keyed on references, not on names -- part-/name-agnostic."""
+    referenced: set = set()
+    directory = top_schematic.parent
+    queue = [top_schematic.name]
+    visited = {top_schematic.name}
+    while queue:
+        name = queue.pop()
+        f = directory / name
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for ref in _SHEETFILE_RE.findall(text):
+            base = Path(ref).name
+            referenced.add(base)
+            if base not in visited:
+                visited.add(base)
+                queue.append(base)
+    return referenced
+
+
+def _prune_orphan_sheets(
+    project_dir: Path, schematic_file: Path, clean: bool
+) -> Dict[str, Any]:
+    """Delete/list child ``.kicad_sch`` the rendered top no longer references (B6).
+
+    A renamed/removed ``@subcircuit`` leaves its old child sheet on disk,
+    unreferenced -- confusing in the deliverable. Keyed on the top's ``Sheetfile``
+    references (part-/name-agnostic). ``clean=False`` lists but keeps them.
+    Never raises: cleanup must not fail the run."""
+    try:
+        referenced = _referenced_sheet_files(schematic_file)
+        orphans = []
+        for child in sorted(project_dir.glob("*.kicad_sch")):
+            if child.name == schematic_file.name:
+                continue
+            if child.name not in referenced:
+                orphans.append(child.name)
+                if clean:
+                    child.unlink()
+        if orphans:
+            if clean:
+                logger.warning(
+                    "removed %d orphan child sheet(s) no longer referenced by "
+                    "%s: %s", len(orphans), schematic_file.name,
+                    ", ".join(orphans),
+                )
+            else:
+                logger.warning(
+                    "%d orphan child sheet(s) not referenced by %s (kept; "
+                    "clean_orphan_sheets=False): %s", len(orphans),
+                    schematic_file.name, ", ".join(orphans),
+                )
+        return {
+            "ok": True,
+            "removed": orphans if clean else [],
+            "found": orphans,
+        }
+    except Exception as e:  # noqa: BLE001 - cleanup must never fail the run
+        logger.warning("orphan-sheet cleanup errored: %s", e)
+        return {"ok": True, "error": str(e)}
+
+
 def generate(
     circuit,
     project_name: str,
@@ -124,6 +196,7 @@ def generate(
     run_footprint_check: bool = True,
     run_drawing_connectivity: bool = True,
     drawing_must_match: bool = False,
+    clean_orphan_sheets: bool = True,
     export_bom: bool = True,
     bom_fields: Optional[str] = None,
     export_pdf_schematic: bool = True,
@@ -162,6 +235,12 @@ def generate(
             sets ``steps["drawing_connectivity"]["equiv"]``.
         drawing_must_match: if True, a drawing-vs-netlist mismatch (equiv=False)
             fails the project. Off by default (report-only).
+        clean_orphan_sheets: after a successful render, delete any child
+            ``.kicad_sch`` in the project dir that the freshly rendered top no
+            longer references (a stale sheet left by a prior run whose
+            ``@subcircuit`` was renamed/removed -- E2E B6). Keyed on the top's
+            ``Sheetfile`` references, not names. Set False to keep them (they are
+            listed under ``steps["orphan_sheets"]`` either way). Default True.
         export_bom: export a BOM CSV.
         bom_fields: kicad-cli ``--fields`` string; ``None`` uses
             ``DEFAULT_BOM_FIELDS`` (adds MPN/Manufacturer/Distributor columns).
@@ -323,6 +402,16 @@ def generate(
     except Exception as e:  # noqa: BLE001
         logger.error("schematic generation failed: %s", e)
         steps["schematic"] = {"ok": False, "file": str(schematic_file), "error": str(e)}
+
+    # --- 2b. orphan child-sheet cleanup (E2E B6) ----------------------------
+    # A renamed/removed @subcircuit leaves its old child .kicad_sch on disk,
+    # unreferenced by the freshly rendered top -- confusing in the deliverable.
+    # Delete (or, when opted out, just list) any child sheet the top no longer
+    # references. Keyed on Sheetfile references, so it is part-/name-agnostic.
+    if steps.get("schematic", {}).get("ok"):
+        steps["orphan_sheets"] = _prune_orphan_sheets(
+            project_dir, schematic_file, clean_orphan_sheets
+        )
 
     # --- 3. project scaffold (.kicad_pro) -----------------------------------
     try:

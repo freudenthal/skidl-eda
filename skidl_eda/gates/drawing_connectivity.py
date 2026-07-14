@@ -121,9 +121,15 @@ def check_drawing_connectivity(
         report["equiv"] = equiv
         report["messages"] = messages
         if not equiv:
-            logger.warning(
-                "drawing connectivity: rendered schematic diverges from the logical "
-                "netlist (%d diff(s)); first: %s",
+            # This is a CHECK result, not a verdict: on the default render a
+            # divergence triggers the constructive-relax / deconflict self-heal
+            # retry (see project.generate), which usually recovers to PASS. Word
+            # it as a recoverable step so a final PASS isn't preceded by a line
+            # that reads like a hard failure (E2E B7).
+            logger.info(
+                "drawing connectivity check: %d diff(s) vs the logical netlist "
+                "(recoverable -- the self-heal will re-render and re-verify); "
+                "first: %s",
                 len(messages),
                 messages[0] if messages else "",
             )
