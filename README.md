@@ -47,7 +47,13 @@ result) when those optional peers are not installed.
 ## Installation
 
 `skidl-eda` and its peers are installed from local checkouts (editable during
-development). Python 3.13 or 3.14 is supported.
+development). Python 3.13 or 3.14 is supported (verified end-to-end on CPython
+3.13.14 + KiCad 10.0.4).
+
+The commands below are run **from inside this `skidl-eda/` directory**; the `../`
+peer paths assume the sibling checkouts sit directly beside it (the standard flat
+layout: `skidl/`, `skidl-codegen/`, `skidl-layout/`, `kicad-sch-api/`, and
+`skidl-eda/` all under one parent).
 
 ```bash
 # create an environment (uv shown; venv/pip works the same)
@@ -56,17 +62,43 @@ uv venv --python 3.13 .venv
 # install the peer packages editable, then skidl-eda
 uv pip install -e ../skidl -e ../skidl-layout -e ../skidl-codegen -e ../kicad-sch-api
 uv pip install -e .
+
+# to run the tests AND any simulation, add both extras (neither pytest nor
+# PySpice is in the base install):
+uv pip install -e ".[test,sim]"
 ```
 
-Optional extras:
+Other optional extras:
 
 ```bash
 uv pip install -e ".[sim]"       # PySpice for live skidl.sim simulation
 uv pip install -e ".[sourcing]"  # requests, for keyed DigiKey sourcing
+uv pip install -e ".[test]"      # pytest
+```
+
+Verify the install resolves to the local checkouts:
+
+```bash
+python -c "import skidl, skidl_eda, kicad_sch_api, os; \
+  print(os.path.dirname(skidl.__file__)); print(os.path.dirname(skidl_eda.__file__))"
 ```
 
 A working KiCad 10 install (for its symbol/footprint libraries and `kicad-cli`)
-is required for the gate, export, and PCB steps.
+is required for the gate, export, and PCB steps. On this project it lives at
+`C:\Program Files\KiCad\10.0\`.
+
+### SPICE corpus auto-detection (heads-up)
+
+`setup_kicad10()` auto-defaults `SKIDL_SPICE_LIB_PATH` to a
+[KiCad-Spice-Library](#use-vendor-spice-models-kicad-spice-library) corpus found
+beside the checkouts, in `~/.skidl/`, or above the cwd (so `value="<vendor NAME>"`
+auto-resolves out of the box — see below). A part authored as a *generic* device
+with a `Sim_Params` override (e.g. a diode `value="1N4742A"`, `Sim_Params="BV=12"`)
+whose value merely shares a name with a corpus `.subckt` **still simulates as the
+intended generic model** — the converter only binds a corpus subckt when
+`Sim_Pins` explicitly maps its nodes, or `Sim_Prefer="library"` is set. To pin a
+session to a specific corpus (or none), set `SKIDL_SPICE_LIB_PATH` yourself before
+`setup_kicad10()`; an already-set value always wins.
 
 ## Usage
 
