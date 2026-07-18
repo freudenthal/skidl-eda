@@ -65,7 +65,12 @@ def plan_pcb(
             are omitted from the board rather than blocking it -- they are still
             counted in ``missing_refs``. Set True for a physical-BOM design where
             a missing footprint is a real defect.
-        **plan_kwargs: forwarded to ``skidl_layout.plan_layout``.
+        **plan_kwargs: forwarded verbatim to ``skidl_layout.plan_layout``.
+            Fast in-loop iteration knobs live here: ``candidate_names=[...]`` or
+            ``max_candidates=N`` prune the 8-candidate portfolio, and
+            ``progress=print`` streams stage/per-ref messages. The
+            ``SKIDL_LAYOUT_CANDIDATES`` / ``SKIDL_LAYOUT_MAX_CANDIDATES`` env
+            vars do the same with no code change (read inside ``plan_layout``).
 
     Returns:
         A result dict::

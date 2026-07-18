@@ -181,6 +181,22 @@ print(res["score"], res["overlaps"], res["pcb_written"])
 The PCB step is also available inline as `generate(..., pcb=True)` (opt-in,
 report-only).
 
+**Fast in-loop layout.** Both `plan_pcb(...)` and `generate(..., pcb=True,
+pcb_options={...})` forward layout knobs to `skidl_layout.plan_layout`. For
+quick iteration, prune the 8-candidate portfolio:
+
+```python
+# via generate(): pcb_options is forwarded verbatim to plan_pcb -> plan_layout
+generate(build(), "MyBoard", pcb=True,
+         pcb_options={"candidate_names": ["baseline", "connector_edge_first"]})
+
+# or directly on plan_pcb() as **plan_kwargs
+plan_pcb(build(), "build/MyBoard.kicad_pcb", max_candidates=2)
+```
+
+The `SKIDL_LAYOUT_CANDIDATES` / `SKIDL_LAYOUT_MAX_CANDIDATES` environment
+variables do the same with no code change (read inside `plan_layout`).
+
 ### Find parts and check availability
 
 ```bash

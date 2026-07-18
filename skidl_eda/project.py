@@ -207,6 +207,7 @@ def generate(
     verify_models: bool = False,
     pcb: bool = False,
     pcb_output: Optional[str] = None,
+    pcb_options: Optional[Dict[str, Any]] = None,
     fp_lib_dirs: Optional[list] = None,
     renderer_options: Optional[Dict[str, Any]] = None,
     kicad_cli: Optional[str] = None,
@@ -270,6 +271,14 @@ def generate(
             degrades to a ``skipped`` step if skidl-layout is not installed.
         pcb_output: explicit ``.kicad_pcb`` path (defaults to
             ``<project_dir>/<project_name>.kicad_pcb``).
+        pcb_options: dict forwarded verbatim to :func:`skidl_eda.layout.plan_pcb`
+            (and on to ``skidl_layout.plan_layout``) for fast in-loop layout.
+            E.g. ``{"candidate_names": ["baseline", "connector_edge_first"]}`` or
+            ``{"max_candidates": 2}`` prune the 8-candidate portfolio;
+            ``{"progress": print}`` streams placement progress. The
+            ``SKIDL_LAYOUT_CANDIDATES`` / ``SKIDL_LAYOUT_MAX_CANDIDATES`` env
+            vars achieve the same with no code change. ``None`` keeps the full
+            default portfolio (byte-compatible with pre-existing calls).
         fp_lib_dirs: footprint-library roots for the PCB step (auto-discovered
             from a standard KiCad install when omitted).
         renderer_options: extra kwargs forwarded to ``generate_schematic`` that
@@ -687,7 +696,10 @@ def generate(
 
             pcb_path = pcb_output or str(project_dir / f"{project_name}.kicad_pcb")
             try:
-                pcb_res = plan_pcb(circuit, pcb_path, fp_lib_dirs=fp_lib_dirs)
+                pcb_res = plan_pcb(
+                    circuit, pcb_path, fp_lib_dirs=fp_lib_dirs,
+                    **(pcb_options or {}),
+                )
                 steps["pcb"] = pcb_res
                 result["layout"] = pcb_res
             except LayoutUnavailable as e:

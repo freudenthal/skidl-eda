@@ -91,6 +91,43 @@ def test_generate_scaffolds_openable_project(tmp_path):
     assert result["ok"] is True
 
 
+def test_generate_forwards_pcb_options_to_plan_pcb(tmp_path, monkeypatch):
+    """WS14: generate(pcb=True, pcb_options={...}) threads the options into
+    plan_pcb; pcb_options=None forwards no extra kwargs (byte-compatible)."""
+    _kicad10_or_skip()
+    import sipm_tia_skidl as T
+    import skidl_eda.layout as L
+
+    captured = {}
+
+    def fake_plan_pcb(circuit, output_path, **kwargs):
+        captured.clear()
+        captured.update(kwargs)
+        return {"ok": True, "skipped": False, "score": 0.0}
+
+    monkeypatch.setattr(L, "plan_pcb", fake_plan_pcb, raising=True)
+
+    common = dict(
+        output_dir=str(tmp_path),
+        pcb=True,
+        run_erc_gate=False,
+        run_save_gate=False,
+        export_bom=False,
+        export_pdf_schematic=False,
+    )
+
+    P.generate(
+        T.sipm_tia(), "PcbOpt_On",
+        pcb_options={"candidate_names": ["baseline", "connector_edge_first"]},
+        **common,
+    )
+    assert captured.get("candidate_names") == ["baseline", "connector_edge_first"]
+
+    P.generate(T.sipm_tia(), "PcbOpt_Off", pcb_options=None, **common)
+    assert "candidate_names" not in captured
+    assert "max_candidates" not in captured
+
+
 def test_generate_full_pipeline_passes_gates(tmp_path):
     _kicad10_or_skip()
     if not find_kicad_cli():
