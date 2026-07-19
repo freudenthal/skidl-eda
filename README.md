@@ -266,9 +266,19 @@ subprocess** (a hung ngspice can't stall the sweep), and writes **tiered, hedged
 JSONL records + a markdown rollup.
 
 ```bash
+# the plain CLI (scriptable / for CI-style runs):
 python -m skidl_eda.sourcing.corpus_eval --type diode --limit 20
-python -m skidl_eda.sourcing.corpus_eval --type all --per-class-limit 250 --workers 8
+
+# the WATCHABLE runner (start it and watch it go — live per-part lines, a
+# running tally, rate/ETA, checkpoints; Ctrl-C-safe, resume with --resume):
+python scripts/run_corpus_eval.py --type all --per-class-limit 250 --workers 8
+python scripts/run_corpus_eval.py --type diode --limit 20        # a quick look
 ```
+
+The sweep is an **external batch operation** — nothing in the package or its
+test suite ever triggers a real run; `corpus_eval` is opt-in and the reader only
+*reads* the JSONL if it exists. `scripts/run_corpus_eval.py` is the standalone
+runner you start by hand.
 
 The score is **tiered, never a single grade** (a part can pass every
 single-instance test and still collapse in a multi-instance loop — see LMC6482):
