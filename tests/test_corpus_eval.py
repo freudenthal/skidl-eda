@@ -149,3 +149,105 @@ def test_eval_driver_is_importable_string():
     assert "_run_benches_inproc" in CE._EVAL_DRIVER
     assert "_RESULT_SENTINEL" in CE._EVAL_DRIVER
     assert CE._RESULT_SENTINEL == "@@CORPUS_EVAL@@"
+
+
+# ---- Stage 2: op-amp + diode scoring (pure functions) ----------------------
+
+def _op(measure, val):
+    return {"converged": True, "vectors": {measure: [val]}, "axis": None}
+
+
+def test_status_from():
+    assert CE._status_from([]) == "untested"
+    assert CE._status_from([True, True]) == "pass"
+    assert CE._status_from([True, False]) == "partial"
+    assert CE._status_from([False, False]) == "fail"
+
+
+def test_score_opamp_pass():
+    results = {
+        "follower": _op("V(nout)", 1.0),
+        "inverting": _op("V(nout)", -5.0),
+        "openloop": _op("V(nout)", 14.0),
+        "ac": {"converged": True, "axis": [1e3, 1e4, 1e5, 1e6],
+               "vectors": {"V(nout)": [[1, 0], [1, 0], [0.7, 0], [0.1, 0]]}},
+    }
+    func, caveats = CE._score_opamp(_hit("TL072"), results)
+    assert func["status"] == "pass"
+    assert abs(func["follower_vout"] - 1.0) < 1e-6
+    assert abs(func["inv_gain"] - (-10.0)) < 1e-6
+    assert func["openloop_rails"] is True
+    assert 1e4 <= func["gbw_hz"] <= 1e5
+
+
+def test_score_opamp_dead_device_fails():
+    # A dead 5-node device reads ~0 everywhere -> fail (not a false pass).
+    results = {
+        "follower": _op("V(nout)", 0.0),
+        "inverting": _op("V(nout)", 0.0),
+        "openloop": _op("V(nout)", 0.0),
+    }
+    func, _ = CE._score_opamp(_hit("DEAD"), results)
+    assert func["status"] == "fail"
+
+
+def test_score_opamp_partial():
+    results = {
+        "follower": _op("V(nout)", 1.0),
+        "inverting": _op("V(nout)", 0.0),   # inverting fails
+        "openloop": _op("V(nout)", 14.0),
+    }
+    func, _ = CE._score_opamp(_hit("X"), results)
+    assert func["status"] == "partial"
+
+
+def test_v_at_current_interpolates_vf():
+    dfwd = {"converged": True, "axis": [0, 1.0, 1.6, 2.0],
+            "vectors": {"V(k)": [0.0, 0.6, 0.65, 0.66]}}
+    vf = CE._v_at_current(dfwd, "V(k)", 1e-3)
+    assert vf is not None and 0.64 < vf < 0.66
+
+
+def test_score_diode_pass():
+    results = {
+        "dfwd": {"converged": True, "axis": [0, 1.0, 1.6, 2.0],
+                 "vectors": {"V(k)": [0.0, 0.6, 0.65, 0.66]}},
+        "drev": _op("I(Vr)", -1e-9),
+    }
+    func, caveats = CE._score_diode(_hit("D1N914", device_type="D"), results)
+    assert func["status"] == "pass"
+    assert 0.6 < func["vf_1ma_v"] < 0.7
+    assert func["i_rev_a"] == 1e-09
+    assert caveats == []
+
+
+def test_score_diode_dead_fails():
+    # An open/dead diode never conducts: V(k) tracks the source (V(a)=axis), so
+    # the series current stays 0 and the 1 mA crossing is never reached.
+    results = {"dfwd": {"converged": True, "axis": [0, 1, 2],
+                        "vectors": {"V(k)": [0.0, 1.0, 2.0]}}}  # never conducts
+    func, caveats = CE._score_diode(_hit("D"), results)
+    assert func["status"] == "fail"
+    assert any("no 1 mA forward conduction" in c for c in caveats)
+
+
+def test_score_diode_high_leakage_caveat():
+    results = {
+        "dfwd": {"converged": True, "axis": [0, 1.0, 1.6, 2.0],
+                 "vectors": {"V(k)": [0.0, 0.6, 0.65, 0.66]}},
+        "drev": _op("I(Vr)", -5e-6),  # 5 uA leakage
+    }
+    func, caveats = CE._score_diode(_hit("D"), results)
+    assert func["status"] == "pass"  # leakage is a caveat, not a fail
+    assert any("leakage" in c for c in caveats)
+
+
+def test_build_benches_opamp_and_diode():
+    ob = CE.build_benches(_hit("TL072", kind="subckt",
+                               nodes=["1", "2", "3", "4", "5"]), "opamp")
+    names = [b["name"] for b in ob]
+    assert names == ["smoke", "follower", "inverting", "openloop", "ac"]
+    assert ".ac dec" in ob[-1]["netlist"]
+    db = CE.build_benches(_hit("D1N914", device_type="D"), "diode")
+    assert [b["name"] for b in db] == ["smoke", "dfwd", "drev"]
+    assert ".dc Vin 0 2" in db[1]["netlist"]

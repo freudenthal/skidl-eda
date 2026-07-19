@@ -171,8 +171,17 @@ def _run_benches_inproc(benches: List[Dict[str, Any]], compat: str = "psa") -> D
             pass
 
     def _key_lookup(measure: str, keys: List[str]) -> Optional[str]:
+        # Raw-netlist plots key node voltages by BARE node name (``nout``) and
+        # branch currents as ``<src>#branch`` -- so try both the V(...)/I(...)
+        # wrapped forms and the bare inner name.
         up = {k.upper(): k for k in keys}
-        for cand in (measure.upper(), f"V({measure})".upper(), f"I({measure})".upper()):
+        mm = measure.strip()
+        inner = mm
+        u = mm.upper()
+        if (u.startswith("V(") or u.startswith("I(")) and mm.endswith(")"):
+            inner = mm[2:-1]
+        for cand in (u, inner.upper(), f"V({inner})".upper(),
+                     f"I({inner})".upper(), f"{inner}#branch".upper()):
             if cand in up:
                 return up[cand]
         return None
@@ -214,7 +223,8 @@ def _run_benches_inproc(benches: List[Dict[str, Any]], compat: str = "psa") -> D
             )
             if axk is not None:
                 try:
-                    r["axis"] = _vec(plot, axk)
+                    aw = np.atleast_1d(np.asarray(plot[axk].to_waveform()))
+                    r["axis"] = [float(np.real(x)) for x in aw]  # AC freq is complex
                 except Exception:  # noqa: BLE001
                     pass
         except Exception as e:  # noqa: BLE001
@@ -283,23 +293,251 @@ def _smoke_bench(hit) -> Dict[str, Any]:
     return {"name": "smoke", "netlist": _testbench(hit), "measures": []}
 
 
-def build_benches(hit, cls: str) -> List[Dict[str, Any]]:
-    """Benches for one part. Stage 1: the op-point smoke bench for every class.
+def _inc_path(hit) -> str:
+    """Space-free include path for ngspice (stages a copy if needed)."""
+    from .spice_library import _safe_path
 
-    Stages 2-5 extend this with class-specific functional benches (follower,
-    inverting, DC sweep, ...). The smoke bench always runs first so the
-    dialect/loads/op tiers are populated even when a functional bench is added.
+    return _safe_path(hit.path).replace(os.sep, "/")
+
+
+# ---- op-amp benches (5-node subckt [+in -in V+ V- out]) -------------------- #
+
+def _opamp_benches(hit) -> List[Dict[str, Any]]:
+    inc = '.include "%s"' % _inc_path(hit)
+    nm = hit.name
+    rails = ["Vp vp 0 15", "Vn vn 0 -15"]
+    follower = "\n".join([".title follower", inc, *rails, "Vin nin 0 1.0",
+                          f"X1 nin nout vp vn nout {nm}", "Rl nout 0 1meg",
+                          ".op", ".end", ""])
+    inverting = "\n".join([".title inverting", inc, *rails, "Vin nin 0 0.5",
+                           "Rin nin ninv 1k", "Rf ninv nout 10k",
+                           f"X1 0 ninv vp vn nout {nm}", "Rl nout 0 1meg",
+                           ".op", ".end", ""])
+    openloop = "\n".join([".title openloop", inc, *rails, "Vin nin 0 0.1",
+                          f"X1 nin 0 vp vn nout {nm}", "Rl nout 0 1meg",
+                          ".op", ".end", ""])
+    acgbw = "\n".join([".title acgbw", inc, *rails, "Vin nin 0 dc 0 ac 1",
+                       f"X1 nin nout vp vn nout {nm}", "Rl nout 0 1meg",
+                       ".ac dec 10 1 100meg", ".end", ""])
+    return [
+        {"name": "follower", "netlist": follower, "measures": ["V(nout)"]},
+        {"name": "inverting", "netlist": inverting, "measures": ["V(nout)"]},
+        {"name": "openloop", "netlist": openloop, "measures": ["V(nout)"]},
+        {"name": "ac", "netlist": acgbw, "measures": ["V(nout)"]},
+    ]
+
+
+# ---- diode benches (.model D) ---------------------------------------------- #
+
+def _model_card_bv(hit) -> Optional[float]:
+    """Parse ``BV=`` (reverse breakdown) from this model's card, or None."""
+    try:
+        with open(hit.path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    m = re.search(r"\.model\s+" + re.escape(hit.name) + r"\b(.*?)(?=\n\s*\.model|\Z)",
+                  text, re.IGNORECASE | re.DOTALL)
+    body = m.group(1) if m else text
+    bm = re.search(r"\bbv\s*=\s*([0-9.eE+-]+)", body, re.IGNORECASE)
+    if bm:
+        try:
+            return float(bm.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def _diode_benches(hit) -> List[Dict[str, Any]]:
+    inc = '.include "%s"' % _inc_path(hit)
+    nm = hit.name
+    fwd = "\n".join([".title dfwd", inc, "Vin a 0 0", "R1 a k 1k",
+                     f"D1 k 0 {nm}", ".dc Vin 0 2 0.01", ".end", ""])
+    rev = "\n".join([".title drev", inc, "Vr a 0 5", f"D1 0 a {nm}",
+                     ".op", ".end", ""])
+    benches = [
+        {"name": "dfwd", "netlist": fwd, "measures": ["V(k)"]},
+        {"name": "drev", "netlist": rev, "measures": ["I(Vr)"]},
+    ]
+    bv = _model_card_bv(hit)
+    if bv and bv <= 75.0:  # a zener, not a rectifier's 100s-of-V rating
+        vmax = bv + 2.0
+        dz = "\n".join([".title dz", inc, f"Vz a 0 {vmax:g}", "Rz a k 1k",
+                        f"Dz 0 k {nm}", f".dc Vz 0 {vmax:g} 0.05", ".end", ""])
+        benches.append({"name": "dz", "netlist": dz, "measures": ["V(k)"]})
+    return benches
+
+
+def build_benches(hit, cls: str) -> List[Dict[str, Any]]:
+    """Benches for one part: the op-point smoke bench (always first, so
+    dialect/loads/op are populated) plus any class-specific functional benches.
     """
-    return [_smoke_bench(hit)]
+    benches = [_smoke_bench(hit)]
+    if cls == "opamp":
+        benches += _opamp_benches(hit)
+    elif cls == "diode":
+        benches += _diode_benches(hit)
+    return benches
+
+
+# ---- scoring helpers ------------------------------------------------------- #
+
+def _scalar(results, bench: str, measure: str) -> Optional[float]:
+    """Single measured value from a converged op-point bench, or None."""
+    b = results.get(bench)
+    if not b or not b.get("converged"):
+        return None
+    v = (b.get("vectors") or {}).get(measure)
+    if not v:
+        return None
+    x = v[0]
+    return float(x[0]) if isinstance(x, list) else float(x)
+
+
+def _v_at_current(bench, measure: str, target_i: float, r: float = 1000.0
+                  ) -> Optional[float]:
+    """Interpolate node voltage ``measure`` at series current ``target_i``.
+
+    Current is derived as ``(sweep_axis - measure)/r`` -- the sweep source sits
+    on the top of the series resistor, so its value is the node above ``measure``.
+    Returns None if the sweep never reaches ``target_i``.
+    """
+    b = bench if isinstance(bench, dict) else None
+    if not b or not b.get("converged"):
+        return None
+    axis = b.get("axis")
+    vk = (b.get("vectors") or {}).get(measure)
+    if not axis or not vk or len(axis) != len(vk):
+        return None
+    prev = None
+    for f, vkv in zip(axis, vk):
+        cur = (f - vkv) / r
+        if prev is not None:
+            _fp, ip, vp = prev
+            if ip < target_i <= cur:
+                if cur == ip:
+                    return float(vkv)
+                frac = (target_i - ip) / (cur - ip)
+                return float(vp + frac * (vkv - vp))
+        prev = (f, cur, vkv)
+    return None
+
+
+def _gbw_from_ac(bench) -> Optional[float]:
+    """The -3 dB frequency of the follower AC response (~= GBW at unity gain)."""
+    import math
+
+    if not bench or not bench.get("converged"):
+        return None
+    axis = bench.get("axis")
+    vec = (bench.get("vectors") or {}).get("V(nout)")
+    if not axis or not vec or len(axis) != len(vec):
+        return None
+    mags = [math.hypot(re_im[0], re_im[1]) if isinstance(re_im, list) else abs(re_im)
+            for re_im in vec]
+    dc = mags[0]
+    if dc <= 0:
+        return None
+    target = dc / (2 ** 0.5)
+    for i in range(1, len(mags)):
+        if mags[i] <= target < mags[i - 1]:
+            f_lo, f_hi = axis[i - 1], axis[i]
+            m_lo, m_hi = mags[i - 1], mags[i]
+            if m_lo == m_hi or f_lo <= 0 or f_hi <= 0:
+                return float(f_hi)
+            logf = (math.log10(f_lo)
+                    + (target - m_lo) * (math.log10(f_hi) - math.log10(f_lo)) / (m_hi - m_lo))
+            return float(10 ** logf)
+    return None  # never crossed within the sweep
+
+
+def _status_from(passes: List[bool]) -> str:
+    if not passes:
+        return "untested"
+    if all(passes):
+        return "pass"
+    if any(passes):
+        return "partial"
+    return "fail"
+
+
+# ---- per-class scorers ----------------------------------------------------- #
+
+def _score_opamp(hit, results) -> Tuple[Dict[str, Any], List[str]]:
+    metrics: Dict[str, Any] = {}
+    caveats: List[str] = []
+    passes: List[bool] = []
+
+    fv = _scalar(results, "follower", "V(nout)")
+    if fv is not None:
+        metrics["follower_vout"] = round(fv, 4)
+        passes.append(abs(fv - 1.0) < 0.1)
+    iv = _scalar(results, "inverting", "V(nout)")
+    if iv is not None:
+        gain = iv / 0.5
+        metrics["inv_gain"] = round(gain, 3)
+        passes.append(abs(gain - (-10.0)) <= 1.0)  # -10 +/-10%
+    ov = _scalar(results, "openloop", "V(nout)")
+    if ov is not None:
+        metrics["openloop_vout"] = round(ov, 3)
+        rails = abs(ov) > 10.0
+        metrics["openloop_rails"] = rails
+        passes.append(rails)
+    gbw = _gbw_from_ac(results.get("ac"))
+    if gbw is not None:
+        metrics["gbw_hz"] = float(f"{gbw:.4g}")
+        if gbw < 1e3 or gbw > 1e10:
+            caveats.append(f"GBW {gbw:.3g} Hz implausible")
+
+    status = _status_from(passes)
+    if status == "untested":
+        caveats.append("op-amp benches produced no usable measurement "
+                       "(non-op-amp 5-node subckt or no convergence)")
+    return {"status": status, **metrics}, caveats
+
+
+def _score_diode(hit, results) -> Tuple[Dict[str, Any], List[str]]:
+    metrics: Dict[str, Any] = {}
+    caveats: List[str] = []
+
+    vf = _v_at_current(results.get("dfwd"), "V(k)", 1e-3)
+    irev = _scalar(results, "drev", "I(Vr)")
+    if irev is not None:
+        metrics["i_rev_a"] = float(f"{abs(irev):.3g}")
+        if abs(irev) > 1e-6:
+            caveats.append(f"reverse leakage {abs(irev):.2g} A > 1 uA")
+
+    if vf is None:
+        # No 1 mA forward conduction: a dead / reversed / non-diode model.
+        if results.get("dfwd", {}).get("converged"):
+            caveats.append("no 1 mA forward conduction in 0-2 V sweep")
+            return {"status": "fail", **metrics}, caveats
+        return {"status": "untested", **metrics}, caveats
+
+    metrics["vf_1ma_v"] = round(vf, 4)
+    ok = 0.15 <= vf <= 1.2
+    status = "pass" if ok else "partial"
+    if not ok:
+        caveats.append(f"Vf@1mA={vf:.3f} V outside plausible 0.15-1.2 V band")
+
+    bv = _model_card_bv(hit)
+    if bv and "dz" in results:
+        vz = _v_at_current(results.get("dz"), "V(k)", 5e-3)
+        if vz is not None:
+            metrics["vz_v"] = round(vz, 3)
+            if abs(vz - bv) / bv > 0.10:
+                caveats.append(f"Vz={vz:.2f} V vs card BV={bv:g} V (>10%)")
+    return {"status": status, **metrics}, caveats
 
 
 def score_functional(hit, cls: str, results: Dict[str, Dict[str, Any]]
                      ) -> Tuple[Dict[str, Any], List[str]]:
-    """Return ``(functional_tier, caveats)`` from the bench results.
-
-    Stage 1 base: no functional profile is wired yet, so every part is
-    ``{"status": "untested"}``. Stages 2-5 dispatch on ``cls`` here.
-    """
+    """Return ``(functional_tier, caveats)`` from the bench results, dispatched
+    per eval class. Classes without a profile stay ``{"status": "untested"}``."""
+    if cls == "opamp":
+        return _score_opamp(hit, results)
+    if cls == "diode":
+        return _score_diode(hit, results)
     return {"status": "untested"}, []
 
 
