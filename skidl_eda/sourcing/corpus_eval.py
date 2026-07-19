@@ -368,6 +368,24 @@ def _diode_benches(hit) -> List[Dict[str, Any]]:
     return benches
 
 
+# ---- BJT bench (.model NPN/PNP), common-emitter -------------------------- #
+
+def _bjt_bench(hit) -> Dict[str, Any]:
+    """Common-emitter DC sweep, sign-flipped for PNP. Ib is set by a base
+    resistor from a swept source (Ib=(Vbb-Vb)/RB), Ic by the collector R
+    (Ic=(Vcc-Vc)/RC) -- both read from node voltages, no branch keys needed.
+    """
+    inc = '.include "%s"' % _inc_path(hit)
+    npn = (hit.device_type or "").upper() == "NPN"
+    vcc, stop, step = ("5", "5", "0.02") if npn else ("-5", "-5", "-0.02")
+    nl = "\n".join([".title bjtce", inc,
+                    f"Vcc cc 0 {vcc}", "RC cc c 1k",
+                    f"VBB bb 0 {vcc}", "RB bb b 100k",
+                    f"Q1 c b 0 {hit.name}",
+                    f".dc VBB 0 {stop} {step}", ".end", ""])
+    return {"name": "bjtce", "netlist": nl, "measures": ["V(b)", "V(c)"]}
+
+
 def build_benches(hit, cls: str) -> List[Dict[str, Any]]:
     """Benches for one part: the op-point smoke bench (always first, so
     dialect/loads/op are populated) plus any class-specific functional benches.
@@ -377,6 +395,8 @@ def build_benches(hit, cls: str) -> List[Dict[str, Any]]:
         benches += _opamp_benches(hit)
     elif cls == "diode":
         benches += _diode_benches(hit)
+    elif cls == "bjt":
+        benches.append(_bjt_bench(hit))
     return benches
 
 
@@ -530,6 +550,42 @@ def _score_diode(hit, results) -> Tuple[Dict[str, Any], List[str]]:
     return {"status": status, **metrics}, caveats
 
 
+def _score_bjt(hit, results) -> Tuple[Dict[str, Any], List[str]]:
+    npn = (hit.device_type or "").upper() == "NPN"
+    s = 1.0 if npn else -1.0
+    b = results.get("bjtce")
+    if not b or not b.get("converged"):
+        return {"status": "untested"}, []
+    axis = b.get("axis")
+    vb = (b.get("vectors") or {}).get("V(b)")
+    vc = (b.get("vectors") or {}).get("V(c)")
+    if not axis or not vb or not vc or len(axis) != len(vb) or len(axis) != len(vc):
+        return {"status": "untested"}, ["no common-emitter sweep data"]
+    # Collect active-region operating points (positive Ib, 0.3 < |Vce| < 4.7).
+    active = []  # (Ic, Ib, Vbe, Vce) all sign-normalized to positive
+    for vbb, vbi, vci in zip(axis, vb, vc):
+        ib = s * (vbb - vbi) / 100e3
+        ic = s * (s * 5.0 - vci) / 1e3
+        vce = s * vci
+        vbe = s * vbi
+        if ib > 1e-9 and 0.3 < vce < 4.7:
+            active.append((ic, ib, vbe, vce))
+    if not active:
+        return {"status": "fail"}, ["no active region (0.3<Vce<4.7) found -- dead "
+                                    "device or wrong polarity"]
+    ic, ib, vbe, _vce = min(active, key=lambda t: abs(t[0] - 1e-3))
+    beta = ic / ib if ib > 0 else 0.0
+    metrics = {"beta": round(beta, 1), "vbe_on_v": round(vbe, 4)}
+    caveats: List[str] = []
+    if beta > 2000:
+        caveats.append(f"beta={beta:.0f} suggests a darlington")
+    elif beta < 10:
+        caveats.append(f"beta={beta:.0f} implausibly low")
+    if not (0.55 <= vbe <= 0.85):
+        caveats.append(f"Vbe_on={vbe:.3f} V outside 0.55-0.85 band")
+    return {"status": "pass", **metrics}, caveats
+
+
 def score_functional(hit, cls: str, results: Dict[str, Dict[str, Any]]
                      ) -> Tuple[Dict[str, Any], List[str]]:
     """Return ``(functional_tier, caveats)`` from the bench results, dispatched
@@ -538,6 +594,8 @@ def score_functional(hit, cls: str, results: Dict[str, Dict[str, Any]]
         return _score_opamp(hit, results)
     if cls == "diode":
         return _score_diode(hit, results)
+    if cls == "bjt":
+        return _score_bjt(hit, results)
     return {"status": "untested"}, []
 
 

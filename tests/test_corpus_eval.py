@@ -242,6 +242,65 @@ def test_score_diode_high_leakage_caveat():
     assert any("leakage" in c for c in caveats)
 
 
+def test_score_bjt_npn_pass():
+    # A point where Ib=10uA, Ic=1.5mA (beta 150), Vbe=0.65, Vce=3.5 (active).
+    results = {"bjtce": {"converged": True,
+                         "axis": [0, 1.0, 1.65, 2.5],
+                         "vectors": {"V(b)": [0.0, 0.6, 0.65, 0.70],
+                                     "V(c)": [5.0, 4.9, 3.5, 1.0]}}}
+    func, caveats = CE._score_bjt(_hit("Q2N2222", device_type="NPN"), results)
+    assert func["status"] == "pass"
+    assert 100 < func["beta"] < 200
+    assert 0.6 < func["vbe_on_v"] < 0.7
+    assert caveats == []
+
+
+def test_score_bjt_no_active_region_fails():
+    # Collector never pulls down (device never conducts) -> no active region.
+    results = {"bjtce": {"converged": True, "axis": [0, 1, 2],
+                         "vectors": {"V(b)": [0.0, 0.4, 0.5],
+                                     "V(c)": [5.0, 5.0, 5.0]}}}
+    func, caveats = CE._score_bjt(_hit("QDEAD", device_type="NPN"), results)
+    assert func["status"] == "fail"
+    assert any("no active region" in c for c in caveats)
+
+
+def test_score_bjt_pnp_sign_flip():
+    # Mirror of the NPN pass with negative rails/voltages.
+    results = {"bjtce": {"converged": True,
+                         "axis": [0, -1.0, -1.65, -2.5],
+                         "vectors": {"V(b)": [0.0, -0.6, -0.65, -0.70],
+                                     "V(c)": [-5.0, -4.9, -3.5, -1.0]}}}
+    func, _ = CE._score_bjt(_hit("Q2N2907", device_type="PNP"), results)
+    assert func["status"] == "pass"
+    assert 100 < func["beta"] < 200
+    assert 0.6 < func["vbe_on_v"] < 0.7
+
+
+def test_score_bjt_darlington_caveat():
+    # beta > 2000 -> caveat, still pass.
+    results = {"bjtce": {"converged": True,
+                         "axis": [0, 1.65], "vectors": {"V(b)": [0.0, 0.65],
+                                                        "V(c)": [5.0, 3.5]}}}
+    # Ib=(1.65-0.65)/100k=10uA, Ic=(5-3.5)/1k=1.5mA -> beta 150, not darlington;
+    # craft a darlington: tiny Ib, big Ic.
+    results = {"bjtce": {"converged": True,
+                         "axis": [0, 0.75], "vectors": {"V(b)": [0.0, 0.65],
+                                                        "V(c)": [5.0, 2.0]}}}
+    # Ib=(0.75-0.65)/100k=1uA, Ic=(5-2)/1k=3mA -> beta=3000
+    func, caveats = CE._score_bjt(_hit("QDARL", device_type="NPN"), results)
+    assert func["status"] == "pass"
+    assert any("darlington" in c for c in caveats)
+
+
+def test_build_benches_bjt():
+    b = CE.build_benches(_hit("Q2N2222", device_type="NPN"), "bjt")
+    assert [x["name"] for x in b] == ["smoke", "bjtce"]
+    assert "Vcc cc 0 5" in b[1]["netlist"]
+    bp = CE.build_benches(_hit("Q2N2907", device_type="PNP"), "bjt")
+    assert "Vcc cc 0 -5" in bp[1]["netlist"]
+
+
 def test_build_benches_opamp_and_diode():
     ob = CE.build_benches(_hit("TL072", kind="subckt",
                                nodes=["1", "2", "3", "4", "5"]), "opamp")
