@@ -30,6 +30,8 @@ _LAZY = {
     "default_corpus_path": "spice_library",
     "ensure_library": "spice_library",
     "smoke_test": "spice_library",
+    "reliability_note": "reliability",
+    "record": "reliability",
 }
 
 __all__ = sorted(_LAZY)
