@@ -301,6 +301,84 @@ def test_build_benches_bjt():
     assert "Vcc cc 0 -5" in bp[1]["netlist"]
 
 
+# ---- Stage 4: MOSFET/FET terminal identity + scoring -----------------------
+
+def test_mosfet_subckt_candidates_name_ir_permute():
+    m, c = CE._mosfet_subckt_candidates(
+        _hit("X", kind="subckt", nodes=["drain", "gate", "source"]))
+    assert m == "name" and c == [("mos", (0, 1, 2))]
+    m, c = CE._mosfet_subckt_candidates(
+        _hit("X", kind="subckt", nodes=["10", "20", "30"]))
+    assert m == "ir1020" and c == [("mos", (0, 1, 2))]
+    m, c = CE._mosfet_subckt_candidates(
+        _hit("X", kind="subckt", nodes=["1", "2", "3"]))
+    assert m == "permute" and len(c) == 6
+    m, c = CE._mosfet_subckt_candidates(
+        _hit("X", kind="subckt", nodes=["a", "b", "c", "d"]))
+    assert m == "none"
+
+
+def test_transistor_like():
+    on = ([0, 2, 4, 6, 8, 10], [0.0, 0.0, 0.001, 0.01, 0.05, 0.1])
+    off = ([0, 2, 4, 6, 8, 10], [0.05] * 6)  # conducts regardless of gate
+    assert CE._transistor_like(*on)[0] is True
+    assert CE._transistor_like(*off)[0] is False
+
+
+def _idvgs(idc, vgs=None):
+    vgs = vgs or [0, 2, 4, 6, 8, 10]
+    return {"converged": True, "axis": vgs, "vectors": {"I(Vds)": idc}}
+
+
+def test_score_mosfet_model_pass():
+    # Threshold ~4 V (Id crosses 250 uA near Vgs=4), monotone.
+    results = {"mid": _idvgs([0, 1e-4, 3e-4, 5e-3, 2e-2, 5e-2]),
+               "mrds": {"converged": True, "vectors": {"I(Vds)": [-0.5]},
+                        "axis": None}}
+    func, caveats = CE._score_mosfet_model(_hit("IRFxxx", device_type="VDMOS"), results)
+    assert func["status"] == "pass"
+    assert 0.3 <= abs(func["vth_v"]) <= 6
+    assert "gm_s" in func
+    assert "rds_on_ohm" in func  # 0.1/0.5 = 0.2 ohm
+
+
+def test_score_mosfet_model_dead_fails():
+    results = {"mid": _idvgs([0.0] * 6)}
+    func, _ = CE._score_mosfet_model(_hit("X", device_type="NMOS"), results)
+    assert func["status"] == "fail"
+
+
+def test_score_mosfet_subckt_permutation_resolves():
+    hit = _hit("IRF740", kind="subckt", nodes=["nA", "nB", "nC"])
+    # Only the (D=0,G=1,S=2) assignment behaves like a transistor.
+    results = {"perm_012": _idvgs([0, 1e-4, 3e-4, 5e-3, 2e-2, 5e-2])}
+    for name in ("perm_021", "perm_102", "perm_120", "perm_201", "perm_210"):
+        results[name] = _idvgs([0.03] * 6)  # conduct regardless -> not transistor
+    func, caveats = CE._score_mosfet_subckt(hit, results)
+    assert func["status"] == "pass"
+    assert any("permutation trial" in c and "D=nA G=nB S=nC" in c for c in caveats)
+
+
+def test_score_mosfet_subckt_unresolved_fails():
+    hit = _hit("X", kind="subckt", nodes=["1", "2", "3"])
+    results = {n: _idvgs([0.03] * 6) for n in
+               ("perm_012", "perm_021", "perm_102", "perm_120", "perm_201", "perm_210")}
+    func, caveats = CE._score_mosfet_subckt(hit, results)
+    assert func["status"] == "fail"
+    assert any("unresolved" in c for c in caveats)
+
+
+def test_score_jfet_pass():
+    # NJF: Idss at Vgs=0, pinch-off as Vgs goes negative.
+    results = {"jfet": {"converged": True,
+                        "axis": [0, -1, -2, -3, -4],
+                        "vectors": {"I(Vds)": [-5e-3, -2e-3, -5e-4, -5e-5, -1e-6]}}}
+    func, _ = CE._score_jfet(_hit("J2N3819", device_type="NJF"), results)
+    assert func["status"] == "pass"
+    assert func["idss_a"] == 5e-3
+    assert func["vp_v"] is not None and -4 < func["vp_v"] < 0
+
+
 def test_build_benches_opamp_and_diode():
     ob = CE.build_benches(_hit("TL072", kind="subckt",
                                nodes=["1", "2", "3", "4", "5"]), "opamp")

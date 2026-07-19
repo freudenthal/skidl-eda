@@ -386,6 +386,80 @@ def _bjt_bench(hit) -> Dict[str, Any]:
     return {"name": "bjtce", "netlist": nl, "measures": ["V(b)", "V(c)"]}
 
 
+# ---- MOSFET/FET benches (terminal identity is the crux) ------------------- #
+
+def _mosfet_model_benches(hit) -> List[Dict[str, Any]]:
+    """Id-Vgs sweep + a linear-region Rds_on op-point for a .model MOSFET
+    (terminal order known: M drain gate source [bulk])."""
+    inc = '.include "%s"' % _inc_path(hit)
+    nm = hit.name
+    dt = (hit.device_type or "").upper()
+    s = -1.0 if dt == "PMOS" else 1.0
+    body = f"M1 d g 0 {nm}" if dt == "VDMOS" else f"M1 d g 0 0 {nm}"
+    idvgs = "\n".join([".title mid", inc, f"Vds d 0 {5 * s:g}", "Vgs g 0 0",
+                       body, f".dc Vgs 0 {10 * s:g} {0.1 * s:g}", ".end", ""])
+    rds = "\n".join([".title mrds", inc, f"Vds d 0 {0.1 * s:g}",
+                     f"Vgs g 0 {10 * s:g}", body, ".op", ".end", ""])
+    return [{"name": "mid", "netlist": idvgs, "measures": ["I(Vds)"]},
+            {"name": "mrds", "netlist": rds, "measures": ["I(Vds)"]}]
+
+
+def _mosfet_subckt_candidates(hit) -> Tuple[str, List[Tuple[str, Tuple[int, int, int]]]]:
+    """(method, [(bench_name, (d_pin, g_pin, s_pin))]) for a 3-node FET subckt.
+
+    method: ``name`` (node names carry D/G/S), ``ir1020`` (the IR/Intusoft
+    10/20/30 = D/G/S convention), ``permute`` (6 role assignments to trial), or
+    ``none`` (not a 3-terminal subckt).
+    """
+    import itertools
+
+    nodes = hit.nodes or []
+    if len(nodes) != 3:
+        return ("none", [])
+    roles: Dict[str, int] = {}
+    for i, n in enumerate(nodes):
+        t = _norm_node(n)
+        if t in ("d", "drain"):
+            roles["d"] = i
+        elif t in ("g", "gate"):
+            roles["g"] = i
+        elif t in ("s", "source"):
+            roles["s"] = i
+    if set(roles) == {"d", "g", "s"}:
+        return ("name", [("mos", (roles["d"], roles["g"], roles["s"]))])
+    if nodes == ["10", "20", "30"]:
+        return ("ir1020", [("mos", (0, 1, 2))])
+    cands = [(f"perm_{d}{g}{s}", (d, g, s))
+             for (d, g, s) in itertools.permutations(range(3))]
+    return ("permute", cands)
+
+
+def _mosfet_subckt_benches(hit) -> List[Dict[str, Any]]:
+    inc = '.include "%s"' % _inc_path(hit)
+    nm = hit.name
+    _method, cands = _mosfet_subckt_candidates(hit)
+    out = []
+    for name, (d, g, s) in cands:
+        pos = [None, None, None]
+        pos[d], pos[g], pos[s] = "d", "g", "0"  # source grounded
+        nl = "\n".join([f".title {name}", inc, "Vds d 0 5", "Vgs g 0 0",
+                        f"X1 {pos[0]} {pos[1]} {pos[2]} {nm}",
+                        ".dc Vgs 0 10 0.1", ".end", ""])
+        out.append({"name": name, "netlist": nl, "measures": ["I(Vds)"]})
+    return out
+
+
+def _jfet_bench(hit) -> Dict[str, Any]:
+    """Id-Vgs (depletion) sweep for a .model JFET, sign-flipped for PJF."""
+    inc = '.include "%s"' % _inc_path(hit)
+    nm = hit.name
+    s = 1.0 if (hit.device_type or "").upper() == "NJF" else -1.0
+    nl = "\n".join([".title jfet", inc, f"Vds d 0 {5 * s:g}", "Vgs g 0 0",
+                    f"J1 d g 0 {nm}", f".dc Vgs 0 {-5 * s:g} {-0.05 * s:g}",
+                    ".end", ""])
+    return {"name": "jfet", "netlist": nl, "measures": ["I(Vds)"]}
+
+
 def build_benches(hit, cls: str) -> List[Dict[str, Any]]:
     """Benches for one part: the op-point smoke bench (always first, so
     dialect/loads/op are populated) plus any class-specific functional benches.
@@ -397,6 +471,13 @@ def build_benches(hit, cls: str) -> List[Dict[str, Any]]:
         benches += _diode_benches(hit)
     elif cls == "bjt":
         benches.append(_bjt_bench(hit))
+    elif cls == "mosfet":
+        if hit.kind == "model":
+            benches += _mosfet_model_benches(hit)
+        else:
+            benches += _mosfet_subckt_benches(hit)
+    elif cls == "jfet":
+        benches.append(_jfet_bench(hit))
     return benches
 
 
@@ -586,6 +667,180 @@ def _score_bjt(hit, results) -> Tuple[Dict[str, Any], List[str]]:
     return {"status": "pass", **metrics}, caveats
 
 
+# ---- FET Id-Vgs curve analysis --------------------------------------------- #
+
+def _id_curve(bench) -> Optional[Tuple[List[float], List[float]]]:
+    """(Vgs axis, |Id|) from an Id-Vgs bench (Id = |I(Vds)|), or None."""
+    if not bench or not bench.get("converged"):
+        return None
+    axis = bench.get("axis")
+    iv = (bench.get("vectors") or {}).get("I(Vds)")
+    if not axis or not iv or len(axis) != len(iv):
+        return None
+    return list(axis), [abs(float(x)) for x in iv]
+
+
+def _vth_from_curve(vgs, idc, thr) -> Optional[float]:
+    prev = None
+    for v, i in zip(vgs, idc):
+        if prev is not None:
+            vp, ip = prev
+            if ip < thr <= i:
+                return v if i == ip else vp + (thr - ip) * (v - vp) / (i - ip)
+        prev = (v, i)
+    return None
+
+
+def _gm_peak(vgs, idc) -> float:
+    gm = 0.0
+    for k in range(1, len(vgs)):
+        dv = vgs[k] - vgs[k - 1]
+        if dv:
+            gm = max(gm, abs((idc[k] - idc[k - 1]) / dv))
+    return gm
+
+
+def _transistor_like(vgs, idc) -> Tuple[bool, float]:
+    """(is_transistor, score): off at Vgs=0, conducts >1 mA at full gate, and
+    monotone -- the signature that a D/G/S assignment is the right one."""
+    if not idc:
+        return (False, 0.0)
+    imax = max(idc)
+    if imax < 1e-3:
+        return (False, 0.0)
+    off_ratio = 1.0 - (idc[0] / imax)
+    inc_steps = sum(1 for k in range(1, len(idc)) if idc[k] >= idc[k - 1] - 1e-12)
+    monotone = inc_steps >= 0.7 * max(1, len(idc) - 1)
+    ok = off_ratio > 0.8 and monotone
+    return (ok, imax * off_ratio if ok else 0.0)
+
+
+def _score_mosfet_model(hit, results) -> Tuple[Dict[str, Any], List[str]]:
+    dt = (hit.device_type or "").upper()
+    thr = 1e-3 if dt == "VDMOS" else 250e-6
+    cur = _id_curve(results.get("mid"))
+    if cur is None:
+        return {"status": "untested"}, []
+    vgs, idc = cur
+    caveats: List[str] = []
+    if max(idc) < thr:
+        return {"status": "fail"}, [f"never reaches {thr:g} A drain current "
+                                    "(dead / wrong bias)"]
+    vth = _vth_from_curve(vgs, idc, thr)
+    metrics: Dict[str, Any] = {}
+    if vth is not None:
+        metrics["vth_v"] = round(vth, 3)
+    gm = _gm_peak(vgs, idc)
+    if gm:
+        metrics["gm_s"] = float(f"{gm:.3g}")
+    id_r = _scalar(results, "mrds", "I(Vds)")
+    if id_r is not None and abs(id_r) > 1e-9:
+        metrics["rds_on_ohm"] = float(f"{abs(0.1 / id_r):.3g}")
+    status = "pass"
+    if vth is None or not (0.3 <= abs(vth) <= 6.0):
+        status = "partial"
+        caveats.append(f"Vth={vth} outside plausible 0.3-6 V band")
+    return {"status": status, **metrics}, caveats
+
+
+def _score_mosfet_subckt(hit, results) -> Tuple[Dict[str, Any], List[str]]:
+    method, cands = _mosfet_subckt_candidates(hit)
+    nodes = hit.nodes or []
+    if method == "none":
+        return ({"status": "untestable-generic"},
+                ["power-FET subckt with != 3 terminals; needs per-model pin "
+                 "knowledge"])
+    evals = []  # (score, ok, name, (d,g,s), curve)
+    for name, dgs in cands:
+        cur = _id_curve(results.get(name))
+        if cur is None:
+            continue
+        ok, score = _transistor_like(*cur)
+        evals.append((score, ok, name, dgs, cur))
+    evals.sort(key=lambda t: t[0], reverse=True)
+    tl = [e for e in evals if e[1]]
+
+    if method in ("name", "ir1020"):
+        # Identity is asserted; require the device to actually behave.
+        if not evals:
+            return {"status": "untested"}, []
+        score, ok, name, (d, g, s), cur = evals[0]
+        src = "node NAMES" if method == "name" else "IR 10/20/30 heuristic"
+        cav = [f"terminal identity from {src}: "
+               f"D={nodes[d]} G={nodes[g]} S={nodes[s]}"]
+        if not ok:
+            return ({"status": "fail", **_fet_metrics(cur)},
+                    cav + ["asserted terminals but no transistor behavior "
+                           "(0-10 V gate at Vds=5 V)"])
+        return _finalize_fet(cur, cav)
+
+    # permutation trial
+    if not tl:
+        return ({"status": "fail"},
+                ["terminal identity unresolved (no D/G/S assignment conducted "
+                 "like a transistor)"])
+    score, ok, name, (d, g, s), cur = tl[0]
+    cav = ["terminal identity inferred by permutation trial: "
+           f"D={nodes[d]} G={nodes[g]} S={nodes[s]}"]
+    if len(tl) > 1 and tl[1][0] > 0.5 * score:
+        cav.append("identity ambiguous -- another permutation also conducted")
+    return _finalize_fet(cur, cav)
+
+
+def _fet_metrics(cur) -> Dict[str, Any]:
+    vgs, idc = cur
+    m: Dict[str, Any] = {}
+    vth = _vth_from_curve(vgs, idc, 1e-3)
+    if vth is not None:
+        m["vth_v"] = round(vth, 3)
+    gm = _gm_peak(vgs, idc)
+    if gm:
+        m["gm_s"] = float(f"{gm:.3g}")
+    return m
+
+
+def _finalize_fet(cur, caveats) -> Tuple[Dict[str, Any], List[str]]:
+    m = _fet_metrics(cur)
+    vth = m.get("vth_v")
+    status = "pass"
+    if vth is None or not (0.3 <= abs(vth) <= 6.0):
+        status = "partial"
+        caveats = caveats + [f"Vth={vth} outside plausible 0.3-6 V band"]
+    return {"status": status, **m}, caveats
+
+
+def _score_jfet(hit, results) -> Tuple[Dict[str, Any], List[str]]:
+    cur = _id_curve(results.get("jfet"))
+    if cur is None:
+        return {"status": "untested"}, []
+    vgs, idc = cur
+    idss = idc[0]  # Vgs = 0
+    if idss < 1e-6:
+        return {"status": "fail"}, ["Idss < 1 uA at Vgs=0 (dead / wrong polarity)"]
+    metrics: Dict[str, Any] = {"idss_a": float(f"{idss:.3g}")}
+    caveats: List[str] = []
+    target = 0.02 * idss
+    vp = None
+    prev = None
+    for v, i in zip(vgs, idc):
+        if prev is not None:
+            vprev, iprev = prev
+            if iprev > target >= i:  # falling through pinch-off
+                vp = v if iprev == i else vprev + (target - iprev) * (v - vprev) / (i - iprev)
+                break
+        prev = (v, i)
+    if vp is not None:
+        metrics["vp_v"] = round(vp, 3)
+        status = "pass"
+        if not (0.3 <= abs(vp) <= 10.0):
+            status = "partial"
+            caveats.append(f"Vp={vp:.2f} V outside plausible 0.3-10 V band")
+    else:
+        status = "partial"
+        caveats.append("no pinch-off reached in the 0..-5 V sweep")
+    return {"status": status, **metrics}, caveats
+
+
 def score_functional(hit, cls: str, results: Dict[str, Dict[str, Any]]
                      ) -> Tuple[Dict[str, Any], List[str]]:
     """Return ``(functional_tier, caveats)`` from the bench results, dispatched
@@ -596,6 +851,12 @@ def score_functional(hit, cls: str, results: Dict[str, Dict[str, Any]]
         return _score_diode(hit, results)
     if cls == "bjt":
         return _score_bjt(hit, results)
+    if cls == "mosfet":
+        if hit.kind == "model":
+            return _score_mosfet_model(hit, results)
+        return _score_mosfet_subckt(hit, results)
+    if cls == "jfet":
+        return _score_jfet(hit, results)
     return {"status": "untested"}, []
 
 
