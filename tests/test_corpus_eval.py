@@ -187,7 +187,7 @@ def test_render_report_structure():
     recs = [
         {"part": "D1", "eval_class": "diode",
          "tiers": {"dialect": "yes", "loads": True, "op_converges": True,
-                   "functional": {"status": "untested"}, "transient_loop": "untested"},
+                   "functional": {"status": "pass"}, "transient_loop": "untested"},
          "caveats": [], "error": ""},
         {"part": "BAD", "eval_class": "opamp",
          "tiers": {"dialect": "no", "loads": False, "op_converges": False,
@@ -201,7 +201,31 @@ def test_render_report_structure():
     assert "## diode (1)" in md
     assert "## opamp (1)" in md
     assert "dialect-no: 1" in md
-    assert "| D1 | yes | yes | yes | untested |" in md
+    # a clean pass is summarised, not listed individually
+    assert "functional: pass 1" in md
+    assert "all recorded parts clean" in md
+    # a notable (untestable-generic) row IS listed
+    assert "| BAD | no | - | - | untestable-generic |" in md
+
+
+def test_apply_per_class_cap_strides_and_records_drops():
+    parts = [_hit(f"D{n:03d}", device_type="D") for n in range(10)]
+    parts += [_hit("Q1", device_type="NPN"), _hit("Q2", device_type="NPN")]
+    kept, caps = CE._apply_per_class_cap(parts, "all", 4)
+    assert caps["diode"] == {"kept": 4, "total": 10, "dropped": 6}
+    assert caps["bjt"] == {"kept": 2, "total": 2, "dropped": 0}
+    assert len([h for h in kept if h.name.startswith("D")]) == 4
+
+
+def test_render_report_documents_caps():
+    recs = [{"part": "D1", "eval_class": "diode",
+             "tiers": {"dialect": "yes", "loads": True, "op_converges": True,
+                       "functional": {"status": "pass"}, "transient_loop": "untested"},
+             "caveats": [], "error": ""}]
+    caps = {"diode": {"kept": 1, "total": 100, "dropped": 99}}
+    md = CE.render_report(recs, caps=caps)
+    assert "NOT exhaustive" in md
+    assert "| diode | 100 | 1 | 99 |" in md
 
 
 # ---- driver payload sanity (no ngspice) -----------------------------------

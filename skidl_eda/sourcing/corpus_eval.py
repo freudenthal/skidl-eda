@@ -146,6 +146,32 @@ def enumerate_parts(index, cls: str, only: Optional[str] = None,
     return out
 
 
+def _apply_per_class_cap(parts, type_, limit):
+    """Cap parts per eval class by EVEN STRIDING across the (sorted) name space
+    -- a representative sample, not the alphabetical head. Returns
+    ``(kept, caps)`` where ``caps[cls] = {kept, total, dropped}`` so the report
+    can state exactly what was left out (the no-silent-caps rule)."""
+    from collections import OrderedDict
+
+    by_class = OrderedDict()
+    for hit in parts:
+        cls = type_ if type_ != "all" else classify_eval_class(hit)
+        by_class.setdefault(cls, []).append(hit)
+    kept, caps = [], {}
+    for cls, hits in by_class.items():
+        if len(hits) <= limit:
+            chosen = hits
+        else:
+            step = len(hits) / float(limit)
+            idxs = sorted(set(int(i * step) for i in range(limit)))
+            chosen = [hits[j] for j in idxs]
+        kept.extend(chosen)
+        caps[cls] = {"kept": len(chosen), "total": len(hits),
+                     "dropped": len(hits) - len(chosen)}
+    kept.sort(key=lambda h: h.name.lower())
+    return kept, caps
+
+
 # --------------------------------------------------------------------------- #
 # Bench execution (in a bounded subprocess)                                   #
 # --------------------------------------------------------------------------- #
@@ -1132,14 +1158,39 @@ def _tier_cell(rec: Dict[str, Any]) -> Tuple[str, str, str, str]:
     return d, loads, op, func
 
 
-def render_report(records: List[Dict[str, Any]], wall_s: Optional[float] = None) -> str:
+_NOTABLE_CAP = 100  # per-class notable-row detail cap in the markdown report
+
+
+def _is_notable(rec: Dict[str, Any]) -> bool:
+    """A row worth listing individually: any non-clean outcome or a caveat."""
+    t = rec.get("tiers", {})
+    f = (t.get("functional") or {}).get("status")
+    return (bool(rec.get("error")) or bool(rec.get("caveats"))
+            or t.get("dialect") == "no" or not t.get("loads")
+            or f in ("fail", "partial", "untestable-generic"))
+
+
+def render_report(records: List[Dict[str, Any]], wall_s: Optional[float] = None,
+                  caps: Optional[Dict[str, Any]] = None) -> str:
+    from collections import Counter
+
     lines = ["# corpus_eval -- SPICE-model reliability sweep", ""]
     lines.append(f"Harness version {HARNESS_VERSION}. "
                  f"{len(records)} part(s) recorded"
                  + (f"; wall {wall_s:.0f}s." if wall_s else ".") )
     lines += ["", _REPORT_HEDGE, ""]
 
-    # Failure taxonomy.
+    if caps and any(v.get("dropped") for v in caps.values()):
+        lines += ["## Coverage (per-class cap applied -- NOT exhaustive)", "",
+                  "This run sampled each class by even striding across the name "
+                  "space; dropped parts were **not** evaluated:", "",
+                  "| class | total | sampled | dropped |", "|---|---|---|---|"]
+        for cls in sorted(caps):
+            v = caps[cls]
+            lines.append(f"| {cls} | {v['total']} | {v['kept']} | {v['dropped']} |")
+        lines.append("")
+
+    # Global failure taxonomy.
     tax = {"dialect-no": 0, "fails-to-load": 0, "no-op-convergence": 0,
            "functional-fail": 0, "terminal-unresolved": 0,
            "untestable-generic": 0, "timeout": 0}
@@ -1160,27 +1211,49 @@ def render_report(records: List[Dict[str, Any]], wall_s: Optional[float] = None)
             tax["untestable-generic"] += 1
         if "terminal identity unresolved" in (r.get("error") or ""):
             tax["terminal-unresolved"] += 1
-    lines += ["## Failure taxonomy", ""]
+    lines += ["## Failure taxonomy (all records)", ""]
     for k, v in tax.items():
         lines.append(f"- {k}: {v}")
     lines.append("")
 
-    # Per-class tables.
+    # Per-class: a status summary (all rows) + a detail table of NOTABLE rows
+    # only (clean passes are counted, not listed -- the JSONL holds them all).
     by_class: Dict[str, List[Dict[str, Any]]] = {}
     for r in records:
         by_class.setdefault(r.get("eval_class", "?"), []).append(r)
+    order = {"pass": 0, "partial": 1, "fail": 2, "untestable-generic": 3,
+             "untested": 4}
     for cls in sorted(by_class):
-        rows = sorted(by_class[cls], key=lambda r: str(r.get("part", "")).lower())
-        lines += [f"## {cls} ({len(rows)})", "",
+        rows = by_class[cls]
+        cnt = Counter((r.get("tiers", {}).get("functional") or {}).get("status", "untested")
+                      for r in rows)
+        summ = ", ".join(f"{k} {cnt[k]}" for k in
+                         ("pass", "partial", "fail", "untestable-generic", "untested")
+                         if cnt.get(k))
+        lines += [f"## {cls} ({len(rows)})", "", f"functional: {summ}", ""]
+        notable = sorted(
+            (r for r in rows if _is_notable(r)),
+            key=lambda r: (order.get((r.get("tiers", {}).get("functional") or {})
+                                     .get("status", "untested"), 9),
+                           str(r.get("part", "")).lower()))
+        if not notable:
+            lines += ["_all recorded parts clean (loads + op + functional pass); "
+                      "see the JSONL for per-part metrics._", ""]
+            continue
+        shown = notable[:_NOTABLE_CAP]
+        lines += ["Notable rows (non-clean or caveated):", "",
                   "| part | dialect | loads | op | functional | caveats |",
                   "|---|---|---|---|---|---|"]
-        for r in rows:
+        for r in shown:
             d, loads, op, func = _tier_cell(r)
             cav = "; ".join(r.get("caveats", []))
             if r.get("error"):
                 cav = (cav + "; " if cav else "") + f"err: {r['error']}"
             cav = cav.replace("|", "/")[:120]
             lines.append(f"| {r.get('part')} | {d} | {loads} | {op} | {func} | {cav} |")
+        if len(notable) > _NOTABLE_CAP:
+            lines.append(f"| ... | | | | | +{len(notable) - _NOTABLE_CAP} more "
+                         "notable rows (see JSONL) |")
         lines.append("")
     return "\n".join(lines)
 
@@ -1215,6 +1288,14 @@ def main(argv=None) -> int:
     ap.add_argument("--path", help="explicit corpus path (repo root or Models dir)")
     ap.add_argument("--date", help="override the record date (YYYY-MM-DD; for tests)")
     ap.add_argument("--quiet", action="store_true", help="suppress per-part progress")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="concurrent bounded subprocesses (default 1). The corpus "
+                         "holds ~44k models, so a full sweep needs parallelism.")
+    ap.add_argument("--per-class-limit", type=int,
+                    help="cap parts PER eval class (documented in the report -- no "
+                         "silent caps). Use for a bounded representative sweep.")
+    ap.add_argument("--checkpoint-every", type=int, default=250,
+                    help="flush the JSONL + report every N evaluations (default 250)")
     args = ap.parse_args(argv)
 
     from . import spice_library as SL
@@ -1231,39 +1312,77 @@ def main(argv=None) -> int:
 
     existing = {r.get("part"): r for r in _read_records(out_path)}
     parts = enumerate_parts(index, args.type_, only=args.only, limit=args.limit)
+    caps = {}
+    if args.per_class_limit:
+        parts, caps = _apply_per_class_cap(parts, args.type_, args.per_class_limit)
     if not parts:
         print(f"# no parts for --type {args.type_}"
               + (f" --only {args.only}" if args.only else ""), file=sys.stderr)
         return 2
 
-    import time
-    t0 = time.time()
-    done = 0
-    for i, hit in enumerate(parts, 1):
+    # Build the pending work-list (after resume filtering).
+    pending = []
+    for hit in parts:
         cls = args.type_ if args.type_ != "all" else classify_eval_class(hit)
         prev = existing.get(hit.name)
         if prev is not None and prev.get("harness_version") == HARNESS_VERSION:
             if args.resume and not (args.rerun_failures and _is_failure(prev)):
                 continue
-        rec = evaluate_part(hit, cls, models_dir, compat=args.compat,
-                            timeout_s=args.timeout, date=args.date)
-        existing[hit.name] = rec
-        done += 1
-        if not args.quiet:
-            t = rec["tiers"]
-            f = (t.get("functional") or {}).get("status")
-            print(f"[{i}/{len(parts)}] {hit.name:<28} "
-                  f"dialect={t['dialect']} loads={t['loads']} op={t['op_converges']} "
-                  f"func={f}"
-                  + (f"  ERR {rec['error'][:60]}" if rec['error'] else ""),
-                  file=sys.stderr)
+        pending.append((hit, cls))
 
-    records = list(existing.values())
-    _write_records(out_path, records)
-    wall = time.time() - t0
-    report_path.write_text(render_report(records, wall_s=wall), encoding="utf-8")
-    print(f"# {done} evaluated, {len(records)} total -> {out_path}", file=sys.stderr)
+    import time
+    t0 = time.time()
+
+    def _flush():
+        recs = list(existing.values())
+        _write_records(out_path, recs)
+        report_path.write_text(
+            render_report(recs, wall_s=time.time() - t0, caps=caps), encoding="utf-8")
+
+    def _progress(i, hit, rec):
+        if args.quiet:
+            return
+        t = rec["tiers"]
+        f = (t.get("functional") or {}).get("status")
+        print(f"[{i}/{len(pending)}] {hit.name:<28} "
+              f"dialect={t['dialect']} loads={t['loads']} op={t['op_converges']} "
+              f"func={f}" + (f"  ERR {rec['error'][:60]}" if rec['error'] else ""),
+              file=sys.stderr)
+
+    done = 0
+    ev = lambda hc: evaluate_part(hc[0], hc[1], models_dir, compat=args.compat,
+                                  timeout_s=args.timeout, date=args.date)
+    if args.workers and args.workers > 1:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        with ThreadPoolExecutor(max_workers=args.workers) as pool:
+            futs = {pool.submit(ev, hc): hc for hc in pending}
+            for fut in as_completed(futs):
+                hit, _cls = futs[fut]
+                rec = fut.result()
+                existing[hit.name] = rec
+                done += 1
+                _progress(done, hit, rec)
+                if done % args.checkpoint_every == 0:
+                    _flush()
+    else:
+        for hc in pending:
+            rec = ev(hc)
+            existing[hc[0].name] = rec
+            done += 1
+            _progress(done, hc[0], rec)
+            if done % args.checkpoint_every == 0:
+                _flush()
+
+    _flush()
+    print(f"# {done} evaluated, {len(existing)} total -> {out_path}", file=sys.stderr)
     print(f"# report -> {report_path}", file=sys.stderr)
+    if caps:
+        capped = {k: v for k, v in caps.items() if v.get("dropped")}
+        if capped:
+            print(f"# per-class cap dropped: "
+                  + ", ".join(f"{k} {v['dropped']}" for k, v in capped.items()),
+                  file=sys.stderr)
     return 0
 
 
