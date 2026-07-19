@@ -13,37 +13,67 @@ from skidl_eda.diagnostics.diagnose import (
 # ---- knowledge base --------------------------------------------------------
 
 def test_kb_defaults_load_and_search():
-    with D.DebugKnowledgeBase() as kb:  # in-memory default
+    with D.DebugKnowledgeBase() as kb:  # seed-only in-memory index
         matches = kb.search_patterns(
-            ["3.3V rail reading low", "regulator hot", "excessive current"]
+            ["LLC output voltage low", "MOSFETs hot / hard switching"]
         )
-    assert matches, "expected a pattern match for the overloaded-regulator symptoms"
+    assert matches, "expected a pattern match for the LLC operating-point symptoms"
     pattern, score = matches[0]
     assert pattern.category == "power"
-    assert "regulator" in pattern.root_cause.lower()
+    assert "gain" in pattern.root_cause.lower() or "resonant" in pattern.root_cause.lower()
     assert 0.0 < score <= 1.0
 
 
-def test_kb_in_memory_default_writes_no_file(tmp_path, monkeypatch):
-    # Default DB is :memory:, so constructing one must not create memory-bank/.
+def test_kb_writes_no_file(tmp_path, monkeypatch):
+    # The index is always in-memory; constructing one must not write anything
+    # (no memory-bank/, no kb.db) even from a cwd with no .claude ancestor.
+    monkeypatch.delenv("SKIDL_EDA_MEMORY_DIR", raising=False)
     monkeypatch.chdir(tmp_path)
     kb = D.DebugKnowledgeBase()
     kb.close()
-    assert not (tmp_path / "memory-bank").exists()
+    assert list(tmp_path.iterdir()) == []
 
 
-def test_kb_persists_when_path_given(tmp_path):
-    db = tmp_path / "kb.db"
-    with D.DebugKnowledgeBase(db_path=db) as kb:
-        assert kb.search_patterns(["I2C NACK", "no ACK from slave"])
-    assert db.exists()
+def test_kb_overlay_from_memory_dir(tmp_path):
+    # A run appends a newly discovered trap by dropping a JSONL line into the
+    # .claude/memory overlay -- no code change, and it is searchable immediately.
+    import json
+
+    (tmp_path / "debug_patterns.jsonl").write_text(
+        json.dumps(
+            {
+                "id": "my-local-trap",
+                "category": "power",
+                "symptoms": ["gizmo rail collapses under load", "gizmo brownout"],
+                "root_cause": "the gizmo needs a bulk cap",
+                "solutions": ["add a 470uF bulk cap on the gizmo rail"],
+                "component_types": ["Gizmo"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with D.DebugKnowledgeBase(memory_dir=tmp_path) as kb:
+        matches = kb.search_patterns(["gizmo rail collapses under load"])
+    assert any(p.pattern_id == "my-local-trap" for p, _ in matches)
+
+
+def test_kb_spice_model_notes():
+    with D.DebugKnowledgeBase() as kb:
+        ir = kb.spice_model_notes("IR2104")
+        assert ir and ir[0].status == "conditional"
+        assert "threshold" in ir[0].trap.lower()
+        # a substring filter finds IRF740; a status filter narrows the corpus
+        assert kb.spice_model_notes("IRF")
+        assert any(n.status == "avoid" for n in kb.spice_model_notes())
 
 
 # ---- diagnose facade -------------------------------------------------------
 
 def test_diagnose_returns_cause_and_tree():
-    dx = D.diagnose(["3.3V rail reading low", "regulator hot"])
+    dx = D.diagnose(["LLC output voltage low", "MOSFETs hot / hard switching"])
     assert dx.best is not None
+    assert dx.best.category == "power"
     assert dx.best.solutions
     assert dx.tree is not None and dx.tree.title  # power tree attached
     assert "diagnosis for" in dx.summary()
@@ -62,10 +92,14 @@ def test_diagnose_small_signal_amp_symptom_matches():
     )
 
 
-def test_diagnose_cmrr_symptom_matches():
-    dx = D.diagnose(["CMRR poor", "output moves with common-mode input"])
-    assert dx.best is not None and dx.best.category == "analog"
-    assert any("match" in s.lower() for s in dx.best.solutions)
+def test_diagnose_spice_model_convergence_matches():
+    """A stiff-CMOS-macromodel convergence symptom surfaces the swap-to-bipolar
+    fix -- and the SPICE-model reliability note is reachable per part."""
+    dx = D.diagnose(
+        ["CMOS op-amp macromodel will not converge in a feedback loop"]
+    )
+    assert dx.best is not None, dx.summary()
+    assert any("bipolar" in s.lower() for s in dx.best.solutions)
 
 
 def test_diagnose_driver_never_switches_matches():
@@ -150,13 +184,16 @@ def test_symptoms_from_evaluation():
 def test_diagnose_design_from_gate_output():
     dd = D.diagnose_design(
         erc=_Erc(["power_pin_not_driven"]),
-        extra_symptoms=["power rail oscillating", "audible noise from regulator"],
+        extra_symptoms=[
+            "self-oscillating converter never starts",
+            "singular matrix at start of transient",
+        ],
     )
     # the derived + extra symptoms are surfaced
     assert any("power pin not driven" in s for s in dd.symptoms)
-    # and the oscillation symptom matches the ESR pattern via the per-symptom pass
+    # and the start-up symptom matches the oscillator pattern via the per-symptom pass
     assert dd.best is not None
-    assert "capacitor" in dd.best.root_cause.lower() or "esr" in dd.best.root_cause.lower()
+    assert "start" in dd.best.root_cause.lower() or "singular" in dd.best.root_cause.lower()
 
 
 # ---- ported symptoms / test_guidance smoke ---------------------------------

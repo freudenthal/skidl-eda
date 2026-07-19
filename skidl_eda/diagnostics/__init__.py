@@ -17,7 +17,13 @@ from .diagnose import (  # noqa: F401
     symptoms_from_erc,
     symptoms_from_evaluation,
 )
-from .knowledge_base import ComponentFailure, DebugKnowledgeBase, DebugPattern  # noqa: F401
+from .knowledge_base import (  # noqa: F401
+    ComponentFailure,
+    DebugKnowledgeBase,
+    DebugPattern,
+    SpiceModelNote,
+    resolve_memory_dir,
+)
 from .symptoms import (  # noqa: F401
     MeasurementType,
     OscilloscopeTrace,
@@ -40,6 +46,8 @@ __all__ = [
     "DebugKnowledgeBase",
     "DebugPattern",
     "ComponentFailure",
+    "SpiceModelNote",
+    "resolve_memory_dir",
     "SymptomAnalyzer",
     "TestMeasurement",
     "MeasurementType",
