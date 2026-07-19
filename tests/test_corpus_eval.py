@@ -56,6 +56,68 @@ def test_classify_subckt_shapes():
         _hit("IR2104", kind="subckt", nodes=["1", "2", "3", "4", "5", "6"])) == "subckt"
 
 
+def test_classify_power_fet_before_ldo():
+    # IRF7801 contains "7801" but is a power MOSFET, not an LDO.
+    assert CE.classify_eval_class(
+        _hit("IRF7801", kind="subckt", nodes=["1", "2", "3"])) == "mosfet"
+    # A Wurth inductor part number must not be read as a 78xx regulator.
+    assert CE.classify_eval_class(
+        _hit("7332_744878001", kind="subckt", nodes=["1", "2", "3", "4"])) != "ldo"
+    # A real fixed regulator still lands in ldo.
+    assert CE.classify_eval_class(
+        _hit("LM7805", kind="subckt", nodes=["1", "2", "3"])) == "ldo"
+
+
+def test_ldo_nominal_parse():
+    assert CE._ldo_nominal_v("LM7805") == 5.0
+    assert CE._ldo_nominal_v("MC7812") == 12.0
+    assert CE._ldo_nominal_v("LM317") is None  # adjustable
+    assert CE._ldo_nominal_v("LM1117-3.3") == 3.3
+
+
+def test_ldo_candidates_name_and_permute():
+    m, c = CE._ldo_candidates(_hit("R", kind="subckt", nodes=["in", "out", "gnd"]))
+    assert m == "name" and c == [("byname", (0, 1, 2))]
+    m, c = CE._ldo_candidates(_hit("R", kind="subckt", nodes=["1", "2", "3"]))
+    assert m == "permute" and len(c) == 6
+    m, c = CE._ldo_candidates(_hit("R", kind="subckt", nodes=["1", "2", "3", "4"]))
+    assert m == "none"
+
+
+def test_score_ldo_more_than_3_nodes_untestable():
+    hit = _hit("HL7801E", kind="subckt", nodes=["2", "3", "11", "10"])
+    func, caveats = CE._score_ldo(hit, {})
+    assert func["status"] == "untestable-generic"
+    assert any("per-model pin knowledge" in c for c in caveats)
+
+
+def test_score_ldo_fixed_pass():
+    # A 5 V reg: permutation p012 regulates (Vout ~5, clamped below Vin, flat).
+    hit = _hit("LM7805", kind="subckt", nodes=["1", "2", "3"])
+    results = {"line_p012": {"converged": True, "axis": [7, 9, 11, 13],
+                            "vectors": {"V(vout)": [5.0, 5.0, 5.0, 5.0]}}}
+    # other permutations don't regulate (Vout ~ Vin, i.e. pass-through)
+    for name in ("p021", "p102", "p120", "p201", "p210"):
+        results[f"line_{name}"] = {"converged": True, "axis": [7, 9, 11, 13],
+                                   "vectors": {"V(vout)": [7, 9, 11, 13]}}
+    func, caveats = CE._score_ldo(hit, results)
+    assert func["status"] == "pass"
+    assert abs(func["vout_v"] - 5.0) < 0.1
+    assert any("permutation trial" in c and "IN=1 OUT=2 GND=3" in c for c in caveats)
+
+
+def test_score_ldo_unknown_nominal_partial():
+    hit = _hit("LM317", kind="subckt", nodes=["1", "2", "3"])
+    results = {"line_p012": {"converged": True, "axis": [7, 9, 11, 13],
+                            "vectors": {"V(vout)": [1.25, 1.25, 1.25, 1.25]}}}
+    for name in ("p021", "p102", "p120", "p201", "p210"):
+        results[f"line_{name}"] = {"converged": True, "axis": [7, 9, 11, 13],
+                                   "vectors": {"V(vout)": [7, 9, 11, 13]}}
+    func, caveats = CE._score_ldo(hit, results)
+    assert func["status"] == "partial"
+    assert any("nominal unknown" in c for c in caveats)
+
+
 class _FakeIndex:
     def __init__(self, hits):
         self._hits = hits

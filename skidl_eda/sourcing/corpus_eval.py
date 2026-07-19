@@ -59,9 +59,13 @@ _ALL_CLASSES = _CLASSES  # what --type all sweeps (excludes non-semiconductor "o
 import re
 
 # Names that mark a 3/4-terminal linear regulator subckt (Stage 5 population).
+# 78xx/79xx use lookarounds so a longer part number (Wurth 744878xxx, IRF7801)
+# whose digits merely contain "78xx" doesn't match; power-FET IRF* is filtered
+# out first anyway (classify_eval_class checks _looks_power_fet before this).
 _LDO_NAME_RE = re.compile(
-    r"(78\d\d|79\d\d|LM3[13]7|LM1117|LD1117|AMS1117|LP29\d\d|LP298\d|MIC5\d\d|"
-    r"TPS7\d|MCP170\d|LT176\d|LT30\d\d|REG\d|SPX29\d|NCP\d{3,}|HT75\d)",
+    r"((?<!\d)7[89][LM]?\d\d(?!\d)|LM3[13]7|LM1117|LD1117|AMS1117|LP29\d\d|"
+    r"LP298\d|MIC5\d\d|TPS7\d|MCP170\d|LT176\d|LT30\d\d|(?<![A-Z])REG\d|"
+    r"SPX29\d|HT75\d)",
     re.IGNORECASE,
 )
 # Name prefixes that mark a discrete power-FET subckt (Stage 4 population).
@@ -113,10 +117,11 @@ def classify_eval_class(hit) -> str:
     # subckt
     name = (hit.name or "").upper()
     nodes = hit.nodes or []
-    if _LDO_NAME_RE.search(name) and 3 <= len(nodes) <= 4:
-        return "ldo"
+    # Power-FET first: IRF7801 etc. contain "78xx" but are MOSFETs, not LDOs.
     if _looks_power_fet(hit):
         return "mosfet"
+    if _LDO_NAME_RE.search(name) and 3 <= len(nodes) <= 4:
+        return "ldo"
     if len(nodes) == 5:
         return "opamp"
     return "subckt"
@@ -460,6 +465,85 @@ def _jfet_bench(hit) -> Dict[str, Any]:
     return {"name": "jfet", "netlist": nl, "measures": ["I(Vds)"]}
 
 
+# ---- Linear-regulator (LDO) benches (3-terminal only; honest scope) -------- #
+
+_GND_TOKENS = {"gnd", "ground", "vss", "com", "0", "v00", "agnd", "dgnd"}
+
+
+def _ldo_nominal_v(name: str) -> Optional[float]:
+    """Nominal output volts parsed from a fixed-regulator name, or None
+    (adjustable / unknown). ``LM7805`` -> 5.0; ``LM1117-3.3`` -> 3.3."""
+    m = re.search(r"(?<!\d)7[89][LM]?(\d\d)(?!\d)", name, re.IGNORECASE)
+    if m:
+        v = int(m.group(1))
+        return float(v) if 2 <= v <= 30 else None
+    m2 = re.search(r"[-_ ](\d)[.vV](\d)\b", name)  # -3.3, _5V0
+    if m2:
+        return float(f"{m2.group(1)}.{m2.group(2)}")
+    return None
+
+
+def _ldo_candidates(hit) -> Tuple[str, List[Tuple[str, Tuple[int, int, int]]]]:
+    """(method, [(bench_suffix, (in_pin, out_pin, gnd_pin))]) for a 3-node reg."""
+    import itertools
+
+    nodes = hit.nodes or []
+    if len(nodes) != 3:
+        return ("none", [])
+    role: Dict[str, int] = {}
+    for i, n in enumerate(nodes):
+        t = _norm_node(n)
+        if t in ("in", "vin", "input"):
+            role["in"] = i
+        elif t in ("out", "vout", "output"):
+            role["out"] = i
+        elif t in _GND_TOKENS:
+            role["gnd"] = i
+    if set(role) == {"in", "out", "gnd"}:
+        return ("name", [("byname", (role["in"], role["out"], role["gnd"]))])
+    cands = [(f"p{i}{o}{g}", (i, o, g))
+             for (i, o, g) in itertools.permutations(range(3))]
+    return ("permute", cands)
+
+
+def _ldo_x_line(hit, in_node, out_node, gnd_node, i, o, g) -> str:
+    pos = [None, None, None]
+    pos[i], pos[o], pos[g] = in_node, out_node, gnd_node
+    return f"X1 {pos[0]} {pos[1]} {pos[2]} {hit.name}"
+
+
+def _ldo_benches(hit) -> List[Dict[str, Any]]:
+    if len(hit.nodes or []) != 3:
+        return []
+    inc = '.include "%s"' % _inc_path(hit)
+    method, cands = _ldo_candidates(hit)
+    nom = _ldo_nominal_v(hit.name)
+    vlo, vhi = (nom + 2.0, nom + 8.0) if nom else (6.0, 20.0)
+    vfix = (nom + 3.0) if nom else 12.0
+    # Permutation resolves identity from the line bench only (keeps bench count
+    # bounded at 6); a name-matched reg additionally gets load + dropout.
+    full = method == "name"
+    out = []
+    for cname, (i, o, g) in cands:
+        x = _ldo_x_line(hit, "vin", "vout", "0", i, o, g)
+        line = "\n".join([f".title line_{cname}", inc, f"Vin vin 0 {vlo:g}",
+                          "Iload vout 0 0.1", x,
+                          f".dc Vin {vlo:g} {vhi:g} 0.25", ".end", ""])
+        out.append({"name": f"line_{cname}", "netlist": line, "measures": ["V(vout)"]})
+        if full:
+            load = "\n".join([f".title load_{cname}", inc, f"Vin vin 0 {vfix:g}",
+                              "Iload vout 0 0.001", x,
+                              ".dc Iload 0.001 0.1 0.001", ".end", ""])
+            out.append({"name": f"load_{cname}", "netlist": load,
+                        "measures": ["V(vout)"]})
+            drop = "\n".join([f".title drop_{cname}", inc, f"Vin vin 0 {vhi:g}",
+                              "Iload vout 0 0.1", x,
+                              f".dc Vin {vhi:g} 0.5 -0.25", ".end", ""])
+            out.append({"name": f"drop_{cname}", "netlist": drop,
+                        "measures": ["V(vout)"]})
+    return out
+
+
 def build_benches(hit, cls: str) -> List[Dict[str, Any]]:
     """Benches for one part: the op-point smoke bench (always first, so
     dialect/loads/op are populated) plus any class-specific functional benches.
@@ -478,6 +562,8 @@ def build_benches(hit, cls: str) -> List[Dict[str, Any]]:
             benches += _mosfet_subckt_benches(hit)
     elif cls == "jfet":
         benches.append(_jfet_bench(hit))
+    elif cls == "ldo":
+        benches += _ldo_benches(hit)
     return benches
 
 
@@ -841,6 +927,71 @@ def _score_jfet(hit, results) -> Tuple[Dict[str, Any], List[str]]:
     return {"status": status, **metrics}, caveats
 
 
+def _score_ldo(hit, results) -> Tuple[Dict[str, Any], List[str]]:
+    nodes = hit.nodes or []
+    if len(nodes) != 3:
+        return ({"status": "untestable-generic"},
+                ["regulator subckt with != 3 terminals; needs per-model pin "
+                 "knowledge (enable/UVLO/adj) -- not guessed"])
+    method, cands = _ldo_candidates(hit)
+    nom = _ldo_nominal_v(hit.name)
+    best = None  # (variation, cname, (i,o,g), vin, vout)
+    for cname, (i, o, g) in cands:
+        lb = results.get(f"line_{cname}")
+        if not lb or not lb.get("converged"):
+            continue
+        vin = lb.get("axis")
+        vout = (lb.get("vectors") or {}).get("V(vout)")
+        if not vin or not vout or len(vin) != len(vout):
+            continue
+        vmax, vmin = max(vout), min(vout)
+        if vmax <= 0.5:
+            continue  # no output
+        if not all(vo <= vi - 0.2 for vi, vo in zip(vin, vout)):
+            continue  # must drop voltage (a regulator, not a short/pass-through)
+        variation = vmax - vmin
+        if best is None or variation < best[0]:
+            best = (variation, cname, (i, o, g), vin, vout)
+    if best is None:
+        return ({"status": "untestable-generic"},
+                ["no IN/OUT/GND assignment regulated under generic stimulus "
+                 "(may need an enable/UVLO pin asserted or a specific Vin)"])
+
+    variation, cname, (i, o, g), vin, vout = best
+    vout_mid = vout[len(vout) // 2]
+    line_reg = variation / (vin[-1] - vin[0]) * 1000.0 if vin[-1] != vin[0] else 0.0
+    metrics: Dict[str, Any] = {"vout_v": round(vout_mid, 3),
+                               "line_reg_mv_per_v": round(line_reg, 2)}
+    src = "node NAMES" if method == "name" else "permutation trial"
+    caveats = [f"terminal identity from {src}: "
+               f"IN={nodes[i]} OUT={nodes[o]} GND={nodes[g]}"]
+    if method == "name":
+        load = results.get(f"load_{cname}")
+        if load and load.get("converged"):
+            lv = (load.get("vectors") or {}).get("V(vout)")
+            if lv and len(lv) >= 2:
+                metrics["load_reg_mv"] = round((lv[0] - lv[-1]) * 1000.0, 2)
+        drop = results.get(f"drop_{cname}")
+        if drop and drop.get("converged"):
+            dax, dv = drop.get("axis"), (drop.get("vectors") or {}).get("V(vout)")
+            if dax and dv and len(dax) == len(dv):
+                vreg = max(dv)
+                for vi, vo in zip(dax, dv):
+                    if vo < 0.98 * vreg:
+                        metrics["dropout_v"] = round(vi - vo, 3)
+                        break
+    if nom is not None:
+        if abs(vout_mid - nom) / nom <= 0.05:
+            status = "pass"
+        else:
+            status = "partial"
+            caveats.append(f"Vout={vout_mid:.2f} V vs name-nominal {nom:g} V (>5%)")
+    else:
+        status = "partial"
+        caveats.append("nominal unknown -- measured only")
+    return {"status": status, **metrics}, caveats
+
+
 def score_functional(hit, cls: str, results: Dict[str, Dict[str, Any]]
                      ) -> Tuple[Dict[str, Any], List[str]]:
     """Return ``(functional_tier, caveats)`` from the bench results, dispatched
@@ -857,6 +1008,8 @@ def score_functional(hit, cls: str, results: Dict[str, Dict[str, Any]]
         return _score_mosfet_subckt(hit, results)
     if cls == "jfet":
         return _score_jfet(hit, results)
+    if cls == "ldo":
+        return _score_ldo(hit, results)
     return {"status": "untested"}, []
 
 
