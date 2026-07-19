@@ -256,6 +256,49 @@ override with `--allow-restricted`). Optional gated check:
 > Requires KiCad's bundled ngspice (auto-configured on Windows); the codemodels
 > needed for vendor `POLY(n)` macromodels are loaded automatically.
 
+### Sweep the corpus for reliability (`corpus_eval`)
+
+The corpus is permanently unreliable — models fail to load, are the wrong
+dialect, have swapped terminal identity, have behavioral thresholds above your
+stimulus, or are numerically stiff. `corpus_eval` mechanizes the discovery: it
+wires each part into a canonical, per-class test circuit, runs it in a **bounded
+subprocess** (a hung ngspice can't stall the sweep), and writes **tiered, hedged**
+JSONL records + a markdown rollup.
+
+```bash
+python -m skidl_eda.sourcing.corpus_eval --type diode --limit 20
+python -m skidl_eda.sourcing.corpus_eval --type all --per-class-limit 250 --workers 8
+```
+
+The score is **tiered, never a single grade** (a part can pass every
+single-instance test and still collapse in a multi-instance loop — see LMC6482):
+
+- `dialect` — can ngspice-in-KiCad run this class at all (`yes`/`no`/`unknown`);
+  a hard `no` short-circuits (no sim).
+- `loads` / `op_converges` — the model parses and its `.op` converges.
+- `functional` — per-class metrics scored vs a formula: **op-amp**
+  (follower / inverting G=−10 / open-loop rail / AC→GBW), **diode** (Vf@1mA,
+  leakage, Vz), **BJT** (β, Vbe), **MOSFET/FET** (Vth/gm/Rds_on — with
+  name-match → IR 10/20/30 → permutation-trial terminal identity), **LDO**
+  (line/load/dropout; >3-terminal parts honestly `untestable-generic`).
+  Status is `pass` / `partial` / `fail` / `untestable-generic` / `untested`.
+- `transient_loop` — always `"untested"` (Phase 2, not built): the standing hedge
+  in every record and the report header.
+
+Output (in `.claude/memory/` by default): `corpus_eval_results.jsonl` (the
+exhaustive machine-readable store) + `corpus_eval_report.md` (a summarized,
+hedged rollup that documents any per-class sampling cap — no silent caps). The
+corpus holds **~44k** models, so a full sweep needs `--workers` and is a
+multi-hour job; `--per-class-limit` runs a bounded representative sample
+(even-strided across the name space).
+
+The measured records feed straight into `find_spice_model`'s `reliability:` line
+through the single reader `skidl_eda.sourcing.reliability` — which merges the
+curated seed (`diagnostics/data/spice_model_reliability.jsonl`), a
+`.claude/memory` curated overlay, and these measured results (a curated note
+always wins; a measured-only part gets a synthesized, hedged line). Use `--resume`
+to skip parts already recorded at the current `harness_version`.
+
 ### Bootstrap a new project
 
 ```bash

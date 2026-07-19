@@ -53,10 +53,42 @@ troubleshooting tree (`power`, `analog`, `simulation`, `evaluation`, `spice_mode
  "see":["driver-threshold-uvlo"]}
 ```
 
-`status` ∈ `ok` | `conditional` | `avoid`. `see` cross-links the debug pattern(s)
-the note came from. These records are also surfaced through `diagnose()` under the
-synthetic `spice_model` category, so a convergence symptom can lead straight to
-"this model is stiff — swap it."
+`status` ∈ `ok` | `conditional` | `avoid`. `note` is the one-line selection-time
+caveat (`find_spice_model`'s `reliability:` line); `trap`/`detect`/`workaround`
+carry the detail surfaced through `diagnose()` under the synthetic `spice_model`
+category. `see` cross-links the debug pattern(s) the note came from.
+
+## The reliability reader (one query surface)
+
+`skidl_eda.sourcing.reliability` is the **single reader** for model reliability.
+It merges three layers, later winning per part key:
+
+1. this curated seed (`spice_model_reliability.jsonl`);
+2. a curated overlay `<memory_dir>/spice_model_reliability.jsonl`;
+3. **measured** results `<memory_dir>/corpus_eval_results.jsonl` — the tiered,
+   hedged output of the `corpus_eval` harness (absent → skipped).
+
+`reliability_note(name)` returns the one-line note (a curated `note` always wins;
+a measured-only part gets a synthesized, hedged line ending in
+`transient-loop UNTESTED`). `record(name)` returns the full merged record.
+
+### Measured record format (`corpus_eval_results.jsonl`)
+
+Written **only** by an actual `corpus_eval` run (never hand-edited). One JSON
+object per line, keyed by `part` + `harness_version`, sorted by part:
+
+```json
+{"part":"TL072","origin":"measured","harness_version":1,"date":"2026-07-19",
+ "kind":"subckt","device_type":"","eval_class":"opamp",
+ "file":"Manufacturer/Texas Instruments/tl072.mod","license":"vendor_restricted",
+ "tiers":{"dialect":"yes","loads":true,"op_converges":true,
+          "functional":{"status":"pass","follower_vout":1.0,"gbw_hz":4.85e6},
+          "transient_loop":"untested"},
+ "caveats":[],"error":""}
+```
+
+The `transient_loop` tier is always `"untested"` (single-instance tests never
+prove multi-instance loop robustness); consumers must keep that hedge.
 
 ## Packaging note
 
