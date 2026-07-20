@@ -45,7 +45,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..diagnostics.knowledge_base import resolve_memory_dir
 
 # Bump when the harness semantics change so --resume re-runs stale records.
-HARNESS_VERSION = 1
+# v2: benches embed a minimal extracted model deck instead of .include-ing the
+#     whole library file (fixes file-scoped poisoning), and records carry
+#     file_hash + harness_hash.
+HARNESS_VERSION = 2
 
 # eval classes with a (future or present) functional profile.
 _CLASSES = ["opamp", "diode", "bjt", "mosfet", "jfet", "ldo", "subckt"]
@@ -321,7 +324,8 @@ def _smoke_bench(hit) -> Dict[str, Any]:
     """The op-point load/converge bench, reusing spice_library's testbench."""
     from .spice_library import _testbench
 
-    return {"name": "smoke", "netlist": _testbench(hit), "measures": []}
+    return {"name": "smoke", "netlist": _testbench(hit, header=_model_header(hit)),
+            "measures": []}
 
 
 def _inc_path(hit) -> str:
@@ -331,10 +335,268 @@ def _inc_path(hit) -> str:
     return _safe_path(hit.path).replace(os.sep, "/")
 
 
+# --------------------------------------------------------------------------- #
+# Minimal model deck (fixes FILE-scoped poisoning)                            #
+# --------------------------------------------------------------------------- #
+#
+# Including a whole vendor library (`.include "<file>"`) means ONE malformed
+# line anywhere in a multi-thousand-line file kills every part defined in it --
+# measured: 2101 load failures came from just 102 files, 70 of which failed at
+# 100% (e.g. Zener_DiodesInc.lib, 517/517, poisoned by a bad `i source` line at
+# line 6480). Extracting only the block we need, plus its dependencies, plus
+# top-level .param/.func, and sanitizing to ASCII, addresses every observed
+# root cause: unbalanced .subckt/.ends, non-UTF-8 bytes, undefined parameters,
+# and stray malformed lines elsewhere in the file.
+
+_DEF_CACHE: Dict[Any, Any] = {}
+
+
+def _to_ascii(text: str) -> str:
+    """Drop non-ASCII bytes -- ngspice rejects the whole deck on a UTF-8 error."""
+    return text.encode("ascii", "replace").decode("ascii")
+
+
+def _parse_definitions(path):
+    """``({name.lower(): block_text}, [top-level .param/.func blocks])`` for a file.
+
+    Memoized on (path, mtime, size) so a 500-part library is parsed once.
+    """
+    try:
+        st = os.stat(path)
+        key = (str(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return {}, []
+    hit = _DEF_CACHE.get(key)
+    if hit is not None:
+        return hit
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return {}, []
+
+    defs: Dict[str, str] = {}
+    params: List[str] = []
+    i, n, depth = 0, len(lines), 0
+    while i < n:
+        s = lines[i].strip()
+        low = s.lower()
+        if low.startswith(".subckt"):
+            if depth != 0:  # nested helper -- consumed by its parent block
+                depth += 1
+                i += 1
+                continue
+            start, d, j = i, 1, i + 1
+            while j < n and d > 0:
+                l2 = lines[j].strip().lower()
+                if l2.startswith(".subckt"):
+                    d += 1
+                elif l2.startswith(".ends") or l2 == ".end":
+                    d -= 1
+                j += 1
+            toks = s.split()[1:]
+            # a '+' continued header still names the subckt on the first line
+            if toks:
+                defs.setdefault(toks[0].lower(), "\n".join(lines[start:j]))
+            i = j
+            continue
+        if low.startswith(".ends"):
+            depth = max(0, depth - 1)
+        elif low.startswith(".model") and depth == 0:
+            start, j = i, i + 1
+            while j < n and lines[j].lstrip().startswith("+"):
+                j += 1
+            toks = s.split()
+            if len(toks) >= 2:
+                defs.setdefault(toks[1].lower(), "\n".join(lines[start:j]))
+            i = j
+            continue
+        elif (low.startswith(".param") or low.startswith(".func")) and depth == 0:
+            start, j = i, i + 1
+            while j < n and lines[j].lstrip().startswith("+"):
+                j += 1
+            params.append("\n".join(lines[start:j]))
+            i = j
+            continue
+        i += 1
+
+    _DEF_CACHE[key] = (defs, params)
+    return defs, params
+
+
+_TOKEN_RE = re.compile(r"[A-Za-z_][\w./+-]*")
+
+
+def extract_minimal_deck(path, name, max_defs: int = 400):
+    """The smallest self-contained deck defining ``name``, or None.
+
+    Pulls the target ``.subckt``/``.model`` block plus, transitively, every other
+    definition in the same file whose name appears as a token inside it (a
+    deliberately loose dependency scan -- over-including a definition is
+    harmless, missing one is not), plus all top-level ``.param``/``.func``.
+    Returns ASCII-sanitized text. ``None`` means "fall back to .include".
+    """
+    defs, params = _parse_definitions(path)
+    key = str(name).strip().lower()
+    if key not in defs:
+        return None
+    picked: List[str] = []
+    seen = set()
+    stack = [key]
+    while stack and len(seen) < max_defs:
+        k = stack.pop()
+        if k in seen:
+            continue
+        seen.add(k)
+        block = defs.get(k)
+        if block is None:
+            continue
+        picked.append(block)
+        for tok in _TOKEN_RE.findall(block):
+            t = tok.lower()
+            if t not in seen and t in defs:
+                stack.append(t)
+    return _to_ascii("\n".join(params + picked))
+
+
+_PARAM_REF_RE = re.compile(r"\{([A-Za-z_]\w*)\}")
+
+
+def missing_subckt_params(path, name):
+    """Params the subckt REFERENCES but neither defaults nor the file defines.
+
+    Vendor libraries ship internal helper subckts that only make sense when a
+    parent passes values down (``XIN1 A Ai VCC VGND 74HCT_IN_1 vcc2={vcc1}``).
+    Instantiated standalone they raise ``Undefined parameter [vcc2]``. That is
+    not a broken model, so callers report ``untestable-generic`` rather than a
+    false FAILS-TO-LOAD (the IR2104 lesson).
+    """
+    defs, params = _parse_definitions(path)
+    block = defs.get(str(name).strip().lower())
+    if not block:
+        return set()
+    lines = block.splitlines()
+    header = lines[0]
+    k = 1
+    while k < len(lines) and lines[k].lstrip().startswith("+"):
+        header += " " + lines[k].lstrip()[1:]
+        k += 1
+    declared = {m.lower() for m in re.findall(r"(\w+)\s*=", header)}
+    for p in params:
+        declared |= {m.lower() for m in re.findall(r"(\w+)\s*=", p)}
+    referenced = {m.lower() for m in _PARAM_REF_RE.findall(block)}
+    return referenced - declared
+
+
+def _model_header(hit) -> str:
+    """Deck text for a bench: the minimal extraction, else the legacy include."""
+    try:
+        deck = extract_minimal_deck(hit.path, hit.name)
+    except Exception:  # noqa: BLE001 - never let extraction break a sweep
+        deck = None
+    if deck:
+        return deck
+    return '.include "%s"' % _inc_path(hit)
+
+
+# --------------------------------------------------------------------------- #
+# Hashes: is this record still valid data, and was it produced by this harness? #
+# --------------------------------------------------------------------------- #
+
+_FILE_HASH_CACHE: Dict[Any, str] = {}
+_HARNESS_HASH_CACHE: Dict[str, str] = {}
+
+# Functions whose source defines a record's meaning. Editing the shared set
+# invalidates every class; editing one class's set invalidates only that class.
+_SHARED_FNS = ["_smoke_bench", "_model_header", "extract_minimal_deck",
+               "_parse_definitions", "evaluate_part", "_dialect_of"]
+_CLASS_FNS = {
+    "opamp": ["_opamp_benches", "_score_opamp", "_gbw_from_ac", "_scalar",
+              "_status_from"],
+    "diode": ["_diode_benches", "_score_diode", "_v_at_current",
+              "_model_card_bv", "_scalar"],
+    "bjt": ["_bjt_bench", "_score_bjt"],
+    "mosfet": ["_mosfet_model_benches", "_mosfet_subckt_benches",
+               "_mosfet_subckt_candidates", "_score_mosfet_model",
+               "_score_mosfet_subckt", "_id_curve", "_vth_from_curve",
+               "_gm_peak", "_transistor_like", "_fet_metrics", "_finalize_fet"],
+    "jfet": ["_jfet_bench", "_score_jfet", "_id_curve"],
+    "ldo": ["_ldo_benches", "_ldo_candidates", "_ldo_nominal_v", "_ldo_x_line",
+            "_score_ldo"],
+    "subckt": [],
+}
+
+
+def file_hash(path) -> str:
+    """Fast content hash of a model file -- proves the record describes the data
+    that is on disk now. Memoized on (path, mtime, size)."""
+    import hashlib
+
+    try:
+        st = os.stat(path)
+    except OSError:
+        return ""
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    cached = _FILE_HASH_CACHE.get(key)
+    if cached is not None:
+        return cached
+    h = hashlib.blake2b(digest_size=8)
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return ""
+    digest = h.hexdigest()
+    _FILE_HASH_CACHE[key] = digest
+    return digest
+
+
+def harness_hash(cls: str) -> str:
+    """Hash of the evaluation logic that produced (or would produce) a record for
+    ``cls`` -- HARNESS_VERSION plus the source of the shared + per-class bench
+    builders and scorers. A stale hash means the entry needs re-running."""
+    import hashlib
+    import inspect
+
+    cached = _HARNESS_HASH_CACHE.get(cls)
+    if cached is not None:
+        return cached
+    parts = [f"v{HARNESS_VERSION}"]
+    from . import spice_library as _SL
+
+    for fn in (_SL._testbench,):
+        try:
+            parts.append(inspect.getsource(fn))
+        except (OSError, TypeError):
+            pass
+    for nm in _SHARED_FNS + _CLASS_FNS.get(cls, []):
+        fn = globals().get(nm)
+        if fn is None:
+            continue
+        try:
+            parts.append(inspect.getsource(fn))
+        except (OSError, TypeError):
+            pass
+    digest = hashlib.blake2b("\n".join(parts).encode("utf-8", "replace"),
+                             digest_size=8).hexdigest()
+    _HARNESS_HASH_CACHE[cls] = digest
+    return digest
+
+
+def is_record_current(rec: Dict[str, Any], model_path, cls: str) -> bool:
+    """True when a stored record still reflects both the file on disk and the
+    current harness -- the resume/skip predicate."""
+    if not rec:
+        return False
+    return (rec.get("harness_hash") == harness_hash(cls)
+            and rec.get("file_hash") == file_hash(model_path))
+
+
 # ---- op-amp benches (5-node subckt [+in -in V+ V- out]) -------------------- #
 
 def _opamp_benches(hit) -> List[Dict[str, Any]]:
-    inc = '.include "%s"' % _inc_path(hit)
+    inc = _model_header(hit)
     nm = hit.name
     rails = ["Vp vp 0 15", "Vn vn 0 -15"]
     follower = "\n".join([".title follower", inc, *rails, "Vin nin 0 1.0",
@@ -380,7 +642,7 @@ def _model_card_bv(hit) -> Optional[float]:
 
 
 def _diode_benches(hit) -> List[Dict[str, Any]]:
-    inc = '.include "%s"' % _inc_path(hit)
+    inc = _model_header(hit)
     nm = hit.name
     fwd = "\n".join([".title dfwd", inc, "Vin a 0 0", "R1 a k 1k",
                      f"D1 k 0 {nm}", ".dc Vin 0 2 0.01", ".end", ""])
@@ -406,7 +668,7 @@ def _bjt_bench(hit) -> Dict[str, Any]:
     resistor from a swept source (Ib=(Vbb-Vb)/RB), Ic by the collector R
     (Ic=(Vcc-Vc)/RC) -- both read from node voltages, no branch keys needed.
     """
-    inc = '.include "%s"' % _inc_path(hit)
+    inc = _model_header(hit)
     npn = (hit.device_type or "").upper() == "NPN"
     vcc, stop, step = ("5", "5", "0.02") if npn else ("-5", "-5", "-0.02")
     nl = "\n".join([".title bjtce", inc,
@@ -422,7 +684,7 @@ def _bjt_bench(hit) -> Dict[str, Any]:
 def _mosfet_model_benches(hit) -> List[Dict[str, Any]]:
     """Id-Vgs sweep + a linear-region Rds_on op-point for a .model MOSFET
     (terminal order known: M drain gate source [bulk])."""
-    inc = '.include "%s"' % _inc_path(hit)
+    inc = _model_header(hit)
     nm = hit.name
     dt = (hit.device_type or "").upper()
     s = -1.0 if dt == "PMOS" else 1.0
@@ -466,7 +728,7 @@ def _mosfet_subckt_candidates(hit) -> Tuple[str, List[Tuple[str, Tuple[int, int,
 
 
 def _mosfet_subckt_benches(hit) -> List[Dict[str, Any]]:
-    inc = '.include "%s"' % _inc_path(hit)
+    inc = _model_header(hit)
     nm = hit.name
     _method, cands = _mosfet_subckt_candidates(hit)
     out = []
@@ -482,7 +744,7 @@ def _mosfet_subckt_benches(hit) -> List[Dict[str, Any]]:
 
 def _jfet_bench(hit) -> Dict[str, Any]:
     """Id-Vgs (depletion) sweep for a .model JFET, sign-flipped for PJF."""
-    inc = '.include "%s"' % _inc_path(hit)
+    inc = _model_header(hit)
     nm = hit.name
     s = 1.0 if (hit.device_type or "").upper() == "NJF" else -1.0
     nl = "\n".join([".title jfet", inc, f"Vds d 0 {5 * s:g}", "Vgs g 0 0",
@@ -541,7 +803,7 @@ def _ldo_x_line(hit, in_node, out_node, gnd_node, i, o, g) -> str:
 def _ldo_benches(hit) -> List[Dict[str, Any]]:
     if len(hit.nodes or []) != 3:
         return []
-    inc = '.include "%s"' % _inc_path(hit)
+    inc = _model_header(hit)
     method, cands = _ldo_candidates(hit)
     nom = _ldo_nominal_v(hit.name)
     vlo, vhi = (nom + 2.0, nom + 8.0) if nom else (6.0, 20.0)
@@ -1068,6 +1330,10 @@ def evaluate_part(hit, cls: str, models_dir: Optional[str], compat: str = "psa",
         "date": date or datetime.date.today().isoformat(),
         "kind": hit.kind, "device_type": hit.device_type or "", "eval_class": cls,
         "file": rel.replace("\\", "/"),
+        # file_hash proves the record still describes the bytes on disk;
+        # harness_hash proves it was produced by the current evaluation logic.
+        "file_hash": file_hash(hit.path),
+        "harness_hash": harness_hash(cls),
         "license": classify_license(hit.path, models_dir),
         "tiers": {"dialect": "unknown", "loads": False, "op_converges": False,
                   "functional": {"status": "untested"}, "transient_loop": "untested"},
@@ -1081,6 +1347,22 @@ def evaluate_part(hit, cls: str, models_dir: Optional[str], compat: str = "psa",
         if reason:
             rec["caveats"].append(f"dialect not simulatable: {reason}")
         return rec
+
+    # An internal helper subckt that needs values passed down from a parent is
+    # not instantiable standalone -- report that honestly instead of a false
+    # FAILS-TO-LOAD, and skip the (guaranteed-to-fail) simulation.
+    if hit.kind == "subckt":
+        try:
+            missing = missing_subckt_params(hit.path, hit.name)
+        except Exception:  # noqa: BLE001
+            missing = set()
+        if missing:
+            rec["tiers"]["functional"] = {"status": "untestable-generic"}
+            rec["caveats"].append(
+                "needs caller-supplied subckt parameters ("
+                + ", ".join(sorted(missing)[:6])
+                + ") -- an internal helper subckt, not instantiable standalone")
+            return rec
 
     run = run_benches_bounded(build_benches(hit, cls), compat=compat, timeout_s=timeout_s)
     if run.get("timed_out"):
@@ -1201,6 +1483,8 @@ def render_report(records: List[Dict[str, Any]], wall_s: Optional[float] = None,
             tax["dialect-no"] += 1
         elif "timed out" in (r.get("error") or ""):
             tax["timeout"] += 1
+        elif f == "untestable-generic":
+            pass  # deliberately not simulated -- not a failure
         elif not t.get("loads"):
             tax["fails-to-load"] += 1
         elif not t.get("op_converges"):
@@ -1325,9 +1609,11 @@ def main(argv=None) -> int:
     for hit in parts:
         cls = args.type_ if args.type_ != "all" else classify_eval_class(hit)
         prev = existing.get(hit.name)
-        if prev is not None and prev.get("harness_version") == HARNESS_VERSION:
-            if args.resume and not (args.rerun_failures and _is_failure(prev)):
-                continue
+        # Skip only when the stored record matches BOTH the file on disk and the
+        # current harness logic (an invalidated/blank harness_hash forces a rerun).
+        if (args.resume and is_record_current(prev, hit.path, cls)
+                and not (args.rerun_failures and _is_failure(prev))):
+            continue
         pending.append((hit, cls))
 
     import time

@@ -266,15 +266,21 @@ def _safe_path(path: str) -> str:
         return p
 
 
-def _testbench(hit) -> str:
+def _testbench(hit, header: Optional[str] = None) -> str:
     """A minimal SPICE testbench that instantiates ``hit`` with DC biasing.
 
     The goal is to make ngspice *parse and load* the model (catching encrypted
     bodies, unmet POLY/codemodel needs, dialect errors, undefined subckts) -- not
     to produce a meaningful measurement. Biasing is generic per kind.
+
+    ``header`` overrides the default ``.include "<whole file>"`` line with a
+    caller-supplied model deck. Including a whole vendor library means ONE
+    malformed line anywhere in it kills every part defined in that file, so
+    ``corpus_eval`` passes a minimal extracted deck instead. Default is
+    unchanged (``smoke_test``/``--verify`` behave exactly as before).
     """
     inc = _safe_path(hit.path).replace(os.sep, "/")
-    lines = [".title smoke", f'.include "{inc}"']
+    lines = [".title smoke", header if header else f'.include "{inc}"']
     dt = (hit.device_type or "").upper()
     if hit.kind == "model" and dt.startswith("D"):
         lines += ["V1 1 0 5", "R1 1 2 1k", f"D1 2 0 {hit.name}"]

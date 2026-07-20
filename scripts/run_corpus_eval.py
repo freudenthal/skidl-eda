@@ -243,8 +243,10 @@ def main(argv=None) -> int:
     for hit in parts:
         cls = args.type_ if args.type_ != "all" else CE.classify_eval_class(hit)
         prev = existing.get(hit.name)
-        if (prev is not None and prev.get("harness_version") == CE.HARNESS_VERSION
-                and args.resume
+        # Skip only when the stored record still matches BOTH the file bytes on
+        # disk and the current harness logic; a blanked harness_hash (see
+        # scripts/update_corpus_hashes.py) forces a rerun.
+        if (args.resume and CE.is_record_current(prev, hit.path, cls)
                 and not (args.rerun_failures and CE._is_failure(prev))):
             continue
         pending.append((hit, cls))

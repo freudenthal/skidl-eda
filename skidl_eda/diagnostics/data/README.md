@@ -90,6 +90,17 @@ object per line, keyed by `part` + `harness_version`, sorted by part:
 The `transient_loop` tier is always `"untested"` (single-instance tests never
 prove multi-instance loop robustness); consumers must keep that hedge.
 
+Records also carry two validity hashes:
+
+- `file_hash` — blake2b of the model file's bytes; proves the record still
+  describes the data on disk.
+- `harness_hash` — `HARNESS_VERSION` + the source of the shared and per-class
+  bench builders/scorers that produced it.
+
+A sweep re-runs a part only when one of them no longer matches, so blanking
+`harness_hash` (see `scripts/update_corpus_hashes.py`) marks an entry for
+refresh. An invalidated record may also carry a `rerun_reason`.
+
 ## Packaging note
 
 These files ship as package data. For a non-editable install, ensure the build

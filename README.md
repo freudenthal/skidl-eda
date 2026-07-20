@@ -306,8 +306,40 @@ The measured records feed straight into `find_spice_model`'s `reliability:` line
 through the single reader `skidl_eda.sourcing.reliability` — which merges the
 curated seed (`diagnostics/data/spice_model_reliability.jsonl`), a
 `.claude/memory` curated overlay, and these measured results (a curated note
-always wins; a measured-only part gets a synthesized, hedged line). Use `--resume`
-to skip parts already recorded at the current `harness_version`.
+always wins; a measured-only part gets a synthesized, hedged line).
+
+#### Record validity: two hashes
+
+Every record carries two hashes that make staleness detectable, so a re-run
+refreshes only what actually needs it:
+
+- **`file_hash`** — fast blake2b of the model file's bytes. Proves the record
+  still describes the data on disk; if the corpus file changes, the entry is
+  stale.
+- **`harness_hash`** — hash of `HARNESS_VERSION` plus the *source* of the shared
+  and per-class bench builders/scorers. Editing one class's profile invalidates
+  only that class; editing shared logic invalidates everything.
+
+`--resume` skips a part only when **both** hashes match, so **blanking
+`harness_hash` marks an entry for re-run**:
+
+```bash
+python scripts/update_corpus_hashes.py            # dry run: what would re-run
+python scripts/update_corpus_hashes.py --apply --backup
+```
+
+That backfills both hashes into an existing store and invalidates the records
+that failed to load or errored (~4 s for 20k records). Then re-run the sweep
+with `--resume` to refresh exactly those.
+
+> **Whole-file poisoning (fixed in harness v2).** Benches used to `.include` the
+> entire model file, so one malformed line anywhere in a vendor library killed
+> every part defined in it — measured: 2101 load failures from just 102 files,
+> 70 of which failed at 100%. Benches now embed a **minimal extracted deck** (the
+> target block + its dependencies + file-scope `.param`, ASCII-sanitized), which
+> also fixes non-UTF-8 decks and unbalanced `.subckt`/`.ends`. Internal helper
+> subckts that need caller-supplied parameters are reported as
+> `untestable-generic`, never a false FAILS-TO-LOAD.
 
 ### Bootstrap a new project
 

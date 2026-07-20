@@ -237,6 +237,103 @@ def test_eval_driver_is_importable_string():
     assert CE._RESULT_SENTINEL == "@@CORPUS_EVAL@@"
 
 
+# ---- minimal-deck extraction + hashes (v2) ---------------------------------
+
+_LIB = """* vendor header with a copyright (c) sign
+.param GLOBALR=1k
+.subckt HELPER a b
+Rh a b {GLOBALR}
+.ends
+.subckt TARGET 1 2 3
+Xh 1 2 HELPER
+D1 2 3 DMOD
+.ends
+.model DMOD D(is=1e-14)
+.subckt UNRELATED x y
+Ru x y 1meg
+.ends
+* a malformed line that would poison an .include of the whole file
+Ibad
+"""
+
+
+def _write_lib(tmp_path, text=_LIB, name="lib.lib"):
+    p = tmp_path / name
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+def test_extract_minimal_deck_pulls_deps_and_drops_the_rest(tmp_path):
+    p = _write_lib(tmp_path)
+    deck = CE.extract_minimal_deck(p, "TARGET")
+    assert deck is not None
+    assert ".subckt TARGET" in deck
+    assert ".subckt HELPER" in deck        # X-device dependency
+    assert ".model DMOD" in deck           # device model dependency
+    assert ".param GLOBALR" in deck        # file-scope params come along
+    assert "UNRELATED" not in deck         # unrelated defs are left out
+    assert "Ibad" not in deck              # the poisoning line is gone
+
+
+def test_extract_minimal_deck_is_ascii(tmp_path):
+    p = _write_lib(tmp_path, _LIB.replace("(c)", "© µ"))
+    deck = CE.extract_minimal_deck(p, "TARGET")
+    deck.encode("ascii")  # must not raise — ngspice rejects non-UTF-8 decks
+
+
+def test_extract_minimal_deck_unknown_name_returns_none(tmp_path):
+    p = _write_lib(tmp_path)
+    assert CE.extract_minimal_deck(p, "NOPE") is None  # caller falls back
+
+
+def test_missing_subckt_params_flags_caller_supplied(tmp_path):
+    text = (".subckt CHILD a b PARAMS: speed=1\n"
+            "R1 a b {speed}\n.ends\n"
+            ".subckt NEEDSPARAM a b\n"
+            "R1 a b {vcc2}\n.ends\n")
+    p = _write_lib(tmp_path, text, "p.lib")
+    assert CE.missing_subckt_params(p, "CHILD") == set()      # has a default
+    assert CE.missing_subckt_params(p, "NEEDSPARAM") == {"vcc2"}
+
+
+def test_file_hash_changes_with_content(tmp_path):
+    p = _write_lib(tmp_path)
+    h1 = CE.file_hash(p)
+    assert h1 and len(h1) == 16
+    p.write_text(_LIB + "\n* touched\n", encoding="utf-8")
+    assert CE.file_hash(p) != h1
+    assert CE.file_hash(tmp_path / "nope.lib") == ""
+
+
+def test_harness_hash_is_stable_and_per_class():
+    a, b = CE.harness_hash("diode"), CE.harness_hash("diode")
+    assert a == b and len(a) == 16          # deterministic
+    assert CE.harness_hash("bjt") != a      # per-class
+
+
+def test_is_record_current(tmp_path):
+    p = _write_lib(tmp_path)
+    rec = {"file_hash": CE.file_hash(p), "harness_hash": CE.harness_hash("diode")}
+    assert CE.is_record_current(rec, p, "diode")
+    # a blanked harness_hash (the invalidation marker) forces a re-run
+    assert not CE.is_record_current({**rec, "harness_hash": ""}, p, "diode")
+    # a changed file forces a re-run
+    assert not CE.is_record_current({**rec, "file_hash": "deadbeefdeadbeef"}, p, "diode")
+    assert not CE.is_record_current(None, p, "diode")
+
+
+def test_untestable_generic_not_counted_as_load_failure():
+    recs = [{"part": "H", "eval_class": "subckt",
+             "tiers": {"dialect": "yes", "loads": False, "op_converges": False,
+                       "functional": {"status": "untestable-generic"},
+                       "transient_loop": "untested"},
+             "caveats": ["needs caller-supplied subckt parameters (vcc2)"],
+             "error": ""}]
+    md = CE.render_report(recs)
+    assert "fails-to-load: 0" in md
+    assert "untestable-generic: 1" in md
+
+
 # ---- Stage 2: op-amp + diode scoring (pure functions) ----------------------
 
 def _op(measure, val):
