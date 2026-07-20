@@ -313,7 +313,26 @@ def _testbench(hit, header: Optional[str] = None) -> str:
 
 def smoke_test(name: str, models_dir: Optional[str] = None,
                compat: str = "psa") -> SmokeResult:
-    """Resolve ``name`` in the corpus and check it loads under ngspice."""
+    """Resolve ``name`` in the corpus and check it loads under ngspice.
+
+    **Do NOT short-circuit this with a stored ``corpus_eval`` verdict.** It is a
+    tempting optimization (the harness measured ``loads``/``op_converges``
+    across the whole corpus and a lookup is far cheaper than an ngspice run),
+    and it is wrong: the two answer different questions.
+
+    ``corpus_eval`` v2 deliberately embeds a **minimal extracted deck** so that
+    one malformed line elsewhere in a vendor library cannot condemn every model
+    defined in it. This function ``.include``s the **whole file**, which is what
+    ``Sim_Library=`` does at real simulation time. On a poisoned file the two
+    disagree by design -- e.g. ``1N4733A`` in ``Zener_DiodesInc.lib`` is
+    ``loads: True`` in the store (the model is well-formed) and fails here (the
+    file it lives in is not). This function's pessimistic answer is the one that
+    predicts the user's simulation, so it must keep running for real.
+
+    See ``sourcing/presim.py`` for the sound way to use stored verdicts: report
+    them as model-intrinsic evidence, clearly labelled, without claiming they
+    predict whether an ``.include``-based simulation will load.
+    """
     index = build_catalog(models_dir)
     if index is None:
         return SmokeResult(name, False, False, error="corpus not available")

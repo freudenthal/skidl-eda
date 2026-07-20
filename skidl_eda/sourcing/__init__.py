@@ -32,6 +32,9 @@ _LAZY = {
     "smoke_test": "spice_library",
     "reliability_note": "reliability",
     "record": "reliability",
+    "check_circuit": "presim",
+    "PreSimReport": "presim",
+    "PreSimFinding": "presim",
 }
 
 __all__ = sorted(_LAZY)
