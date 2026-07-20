@@ -153,23 +153,30 @@ def test_presim_report_is_json_serializable(store, index):
 # ---- the deck-scope trap ----------------------------------------------------
 
 def test_summary_never_claims_a_simulation_will_load(store, index):
-    """Regression guard for a rejected optimization.
+    """A stored verdict is evidence, never a prediction.
 
-    It is tempting to serve a stored `loads: True` as smoke_test's answer. The
-    two measure different things: corpus_eval runs a MINIMAL EXTRACTED DECK,
-    while a real sim (and smoke_test) `.include`s the whole library file. On a
-    poisoned file they disagree by design -- 1N4733A is well-formed but its file
-    is not. So a clean presim report must never read as "this will simulate".
+    The sim path and corpus_eval now build the same minimal extracted deck, so
+    the old poisoned-file disagreement (1N4733A well-formed inside a file that
+    is not) is gone for corpus-resolved parts. What survives is the reason this
+    module is advisory at all: a part pinned to an explicit Sim_Library still
+    gets a whole-file include, transient loops are untested for everything, and
+    a record is a past measurement rather than a live run. So a clean report
+    must still never read as "this will simulate".
     """
     store(_rec("1N4733A", loads=True, op=True, status="pass"))
     summary = PS.check_circuit(_circuit(("D1", "1N4733A"))).summary()
-    assert "does NOT prove an .include-based simulation will load" in summary
+    assert "except for parts pinned to an explicit Sim_Library" in summary
+    assert "run verify for those" in summary
     assert "nothing known against these parts" in summary
     assert "not the same as verified" in summary
 
 
 def test_smoke_test_still_runs_live_and_is_documented_as_such():
-    """smoke_test must NOT have grown a stored-verdict short-circuit."""
+    """smoke_test must NOT have grown a stored-verdict short-circuit.
+
+    It now shares corpus_eval's minimal DECK (so its verdict predicts the sim
+    path), which is a different thing from reusing its stored ANSWER.
+    """
     import inspect
 
     from skidl_eda.sourcing import spice_library as _SL
@@ -179,3 +186,6 @@ def test_smoke_test_still_runs_live_and_is_documented_as_such():
     # no reliability/corpus_eval lookup in the live-verify path
     assert "reliability" not in src.split('"""')[2]
     assert not hasattr(_SL, "measured_smoke")
+    # the deck it loads is the one the converter emits, kill switch included
+    assert "_model_header" in inspect.getsource(_SL._smoke_header)
+    assert "SKIDL_SIM_MINIMAL_DECK" in inspect.getsource(_SL._smoke_header)

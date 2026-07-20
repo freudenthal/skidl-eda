@@ -256,6 +256,17 @@ override with `--allow-restricted`). Optional gated check:
 > Requires KiCad's bundled ngspice (auto-configured on Windows); the codemodels
 > needed for vendor `POLY(n)` macromodels are loaded automatically.
 
+**Auto-resolved models load a minimal deck, not the whole file.** One malformed
+line anywhere in a vendor library makes ngspice reject *every* model defined in
+it — measured across this corpus: 2,101 load failures from just 102 files, 70 of
+them 100% dead (`Zener_DiodesInc.lib` alone defines 842 zeners). So the converter
+extracts only the models a netlist needs, plus their same-file dependencies
+(`skidl.sim.model_deck`); `1N4733A` and its file-mates simulate because of it.
+Explicit `Sim_Library=` keeps its whole-file include — pinning a file is user
+intent, and the escape hatch by construction. `SKIDL_SIM_MINIMAL_DECK=0` reverts
+everything to whole-file includes, and moves `smoke_test`/`--verify` with it so
+verification keeps predicting the sim path.
+
 ### Sweep the corpus for reliability (`corpus_eval`)
 
 The corpus is permanently unreliable — models fail to load, are the wrong

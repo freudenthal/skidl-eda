@@ -311,6 +311,26 @@ def _testbench(hit, header: Optional[str] = None) -> str:
     return "\n".join(lines)
 
 
+def _smoke_header(hit) -> Optional[str]:
+    """The deck ``smoke_test`` should load, or None for the whole-file include.
+
+    Mirrors what the skidl converter now emits for a corpus-resolved model, so
+    the verdict predicts the simulation. ``SKIDL_SIM_MINIMAL_DECK=0`` is the
+    same kill switch the converter honors -- flipping it must move both sides,
+    or verification stops matching reality.
+    """
+    if os.environ.get("SKIDL_SIM_MINIMAL_DECK", "1") == "0":
+        return None
+    try:
+        # import-only: corpus_eval's function source is hashed into every stored
+        # record, so it is read from here and never modified.
+        from .corpus_eval import _model_header
+
+        return _model_header(hit)
+    except Exception:  # noqa: BLE001 - never let this break a live check
+        return None
+
+
 def smoke_test(name: str, models_dir: Optional[str] = None,
                compat: str = "psa") -> SmokeResult:
     """Resolve ``name`` in the corpus and check it loads under ngspice.
@@ -318,20 +338,25 @@ def smoke_test(name: str, models_dir: Optional[str] = None,
     **Do NOT short-circuit this with a stored ``corpus_eval`` verdict.** It is a
     tempting optimization (the harness measured ``loads``/``op_converges``
     across the whole corpus and a lookup is far cheaper than an ngspice run),
-    and it is wrong: the two answer different questions.
+    and it is wrong: a stored verdict is not a live run. It was recorded against
+    a file that may since have changed, under a harness version that may since
+    have changed, and reporting it as if ngspice had just answered would turn
+    "we measured this once" into "this works now".
 
-    ``corpus_eval`` v2 deliberately embeds a **minimal extracted deck** so that
-    one malformed line elsewhere in a vendor library cannot condemn every model
-    defined in it. This function ``.include``s the **whole file**, which is what
-    ``Sim_Library=`` does at real simulation time. On a poisoned file the two
-    disagree by design -- e.g. ``1N4733A`` in ``Zener_DiodesInc.lib`` is
-    ``loads: True`` in the store (the model is well-formed) and fails here (the
-    file it lives in is not). This function's pessimistic answer is the one that
-    predicts the user's simulation, so it must keep running for real.
+    What this function *does* share with the harness is the **deck**: like
+    ``corpus_eval`` v2 it loads a minimal extracted deck (via ``_model_header``)
+    rather than ``.include``-ing the whole vendor file. That used to be the
+    difference between them -- ``1N4733A`` was ``loads: True`` in the store and
+    False here, because ``Zener_DiodesInc.lib`` has one malformed line and the
+    whole-file include condemns every model in it. Since the skidl fork's
+    converter took up minimal-deck includes for corpus-resolved models
+    (``skidl.sim.model_deck``), the whole-file answer is the one that no longer
+    predicts the user's simulation. ``SKIDL_SIM_MINIMAL_DECK=0`` reverts both
+    sides together.
 
     See ``sourcing/presim.py`` for the sound way to use stored verdicts: report
     them as model-intrinsic evidence, clearly labelled, without claiming they
-    predict whether an ``.include``-based simulation will load.
+    are a live result.
     """
     index = build_catalog(models_dir)
     if index is None:
@@ -351,7 +376,7 @@ def smoke_test(name: str, models_dir: Optional[str] = None,
             shared.exec_command(f"set ngbehavior={compat}")
         except Exception:  # pragma: no cover
             pass
-    netlist = _testbench(hit)
+    netlist = _testbench(hit, header=_smoke_header(hit))
     res = SmokeResult(name, False, False, kind=hit.kind,
                       device_type=hit.device_type, path=hit.path)
     # Quiet ngspice's parse warnings/errors -- the SmokeResult summarizes outcome.

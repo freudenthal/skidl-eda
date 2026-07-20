@@ -21,16 +21,22 @@ Design rules (inherited, non-negotiable):
 
 ⚠ **Scope of the evidence.** Stored verdicts come from ``corpus_eval``, which
 runs each model in a **minimal extracted deck** -- deliberately, so one bad line
-elsewhere in a vendor library cannot condemn every model defined in it. A real
-simulation instead ``.include``s the whole file via ``Sim_Library=``. So a
-stored ``loads: True`` means *this model is well-formed*, NOT *your simulation
-will load it*: ``1N4733A`` is well-formed but lives in a file whose other
-contents break the include (see ``spice_library.smoke_test``). The asymmetry
-runs one way and this module relies on exactly that -- a model that fails even
-in a minimal deck is genuinely broken (a real finding), while one that passes
-has cleared the lower bar only. Clean output therefore means "nothing known
-against these parts", never "these parts will simulate"; ``summary()`` says so.
-Use ``smoke_test``/``verify_circuit_models`` for the include-level question.
+elsewhere in a vendor library cannot condemn every model defined in it. The
+skidl converter now builds the same kind of deck for a corpus-resolved model
+(``skidl.sim.model_deck``), so the store and the simulation finally agree about
+what gets parsed; ``1N4733A``, well-formed inside a file that breaks a
+whole-file include, simulates today because of it.
+
+A residual gap remains: a part pinned to an explicit ``Sim_Library=`` still
+includes its whole file (user intent is the escape hatch), and
+``SKIDL_SIM_MINIMAL_DECK=0`` reverts everything to whole-file includes. Under
+either, a stored ``loads: True`` again means *this model is well-formed*, not
+*your simulation will load it*. And in every configuration the asymmetry this
+module relies on holds: a model that fails even in a minimal deck is genuinely
+broken (a real finding), while one that passes has cleared the lower bar only.
+Clean output therefore means "nothing known against these parts", never "these
+parts will simulate"; ``summary()`` says so. Use
+``smoke_test``/``verify_circuit_models`` for a live answer.
 """
 
 from __future__ import annotations
@@ -94,9 +100,10 @@ class PreSimReport:
             lines.append("  nothing known against these parts (which is not the "
                          "same as verified)")
         lines.append("  NOTE: single-instance evidence from a minimal extracted "
-                     "deck. It does NOT prove an .include-based simulation will "
-                     "load (run verify for that), and transient-loop robustness "
-                     "is UNTESTED for every part above.")
+                     "deck -- the same deck the sim path now builds, except for "
+                     "parts pinned to an explicit Sim_Library (run verify for "
+                     "those), and transient-loop robustness is UNTESTED for "
+                     "every part above.")
         return "\n".join(lines)
 
 
