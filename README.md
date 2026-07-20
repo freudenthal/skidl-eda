@@ -329,9 +329,26 @@ multi-hour job; `--per-class-limit` runs a bounded representative sample
 
 The measured records feed straight into `find_spice_model`'s `reliability:` line
 through the single reader `skidl_eda.sourcing.reliability` — which merges the
-curated seed (`diagnostics/data/spice_model_reliability.jsonl`), a
-`.claude/memory` curated overlay, and these measured results (a curated note
+curated seed (`diagnostics/data/spice_model_reliability.jsonl`), the **packaged
+measured snapshot** (`diagnostics/data/corpus_eval_results.jsonl.gz`), a
+`.claude/memory` curated overlay, and any local measured results (a curated note
 always wins; a measured-only part gets a synthesized, hedged line).
+
+### Shipping a sweep (`import_corpus_results`)
+
+A full sweep is a multi-hour job, so its result is **bundled with the package**
+rather than re-measured per checkout — a fresh clone inherits the measurements
+immediately, and a local sweep still overrides them on the machine that ran it.
+
+```bash
+python scripts/import_corpus_results.py --dry-run   # preview + summary
+python scripts/import_corpus_results.py             # bundle it
+```
+
+This reads `<memory_dir>/corpus_eval_results.jsonl` (snapshotting first, so it
+is safe to run while a sweep is going) and writes the gzipped package-data
+dataset. Gzip buys ~43× — a full corpus lands around half a megabyte. The output
+is byte-deterministic, so re-importing an unchanged store produces an empty diff.
 
 #### Record validity: two hashes
 

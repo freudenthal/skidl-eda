@@ -61,12 +61,47 @@ category. `see` cross-links the debug pattern(s) the note came from.
 ## The reliability reader (one query surface)
 
 `skidl_eda.sourcing.reliability` is the **single reader** for model reliability.
-It merges three layers, later winning per part key:
+It merges four layers, later winning per part key:
 
 1. this curated seed (`spice_model_reliability.jsonl`);
-2. a curated overlay `<memory_dir>/spice_model_reliability.jsonl`;
-3. **measured** results `<memory_dir>/corpus_eval_results.jsonl` — the tiered,
-   hedged output of the `corpus_eval` harness (absent → skipped).
+2. the **packaged measured snapshot** `corpus_eval_results.jsonl.gz` (shipped
+   here as package data; absent → skipped);
+3. a curated overlay `<memory_dir>/spice_model_reliability.jsonl`;
+4. **measured** results `<memory_dir>/corpus_eval_results.jsonl` — the tiered,
+   hedged output of a local `corpus_eval` harness run (absent → skipped).
+
+A **local sweep (4) always beats the shipped snapshot (2)**: data measured on
+this machine, against the corpus actually installed here, is more authoritative
+than whatever was bundled at release time. A curated note still governs the
+human-facing line either way.
+
+The merged store is **cached** on the (path, mtime, size) of all four layers.
+Without it every `reliability_note()` call re-parsed the whole measured store
+(~0.65 s at 20k records, and `find_spice_model` calls it per hit); with it,
+repeat lookups are ~650× faster. Editing or creating any layer invalidates the
+cache automatically, so the cache is invisible to callers.
+
+### The packaged snapshot (`corpus_eval_results.jsonl.gz`)
+
+A full `corpus_eval` sweep is a multi-hour job, so its result is bundled and
+version-controlled instead of re-measured per checkout. Gzip because the raw
+JSONL is ~10 MB per 20k records and compresses **~43×** — the full corpus lands
+around half a megabyte.
+
+Regenerate it from a finished sweep with:
+
+```bash
+python scripts/import_corpus_results.py            # --dry-run to preview
+```
+
+Records are bundled **whole** (including `file_hash`/`harness_hash`), so the
+shipped dataset can explain and resume itself; pruning to just the fields the
+reader consumes saves only ~0.1 MB compressed and is not worth the opacity. The
+output is **byte-deterministic** (records sorted by part, keys sorted, zeroed
+gzip mtime), so re-importing an unchanged store yields an empty diff rather than
+churning a half-megabyte binary in git history. The importer refuses to bundle
+fewer than `--min-records` (default 1000) so an in-progress sweep can't silently
+replace a complete dataset.
 
 `reliability_note(name)` returns the one-line note (a curated `note` always wins;
 a measured-only part gets a synthesized, hedged line ending in
@@ -136,7 +171,16 @@ refresh. An invalidated record may also carry a `rerun_reason`.
 
 ## Packaging note
 
-These files ship as package data. For a non-editable install, ensure the build
-includes `skidl_eda/diagnostics/data/*.jsonl` (e.g. `[tool.setuptools.package-data]`
-or a `MANIFEST.in` glob). Editable installs (the project default) read them off
-disk directly.
+These files ship as package data, declared in `pyproject.toml`:
+
+```toml
+[tool.setuptools.package-data]
+"skidl_eda.diagnostics" = ["data/*.jsonl", "data/*.jsonl.gz", "data/README.md"]
+```
+
+Current setuptools auto-includes these files even without that block (verified
+by building a wheel both ways — all four data files ship either way), so the
+declaration is belt-and-braces rather than a fix for a live bug. It is worth
+stating anyway: auto-inclusion is version-dependent behaviour, and losing these
+files degrades the reliability reader to curated-only *silently*. Keep the
+`*.jsonl.gz` glob when editing — it covers the bundled measured snapshot.

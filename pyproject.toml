@@ -44,5 +44,15 @@ skidl-eda-bootstrap = "skidl_eda.bootstrap:main"
 [tool.setuptools.packages.find]
 include = ["skidl_eda*"]
 
+[tool.setuptools.package-data]
+# Pin the diagnostics/reliability datasets explicitly. Current setuptools does
+# auto-include them (verified: a wheel built without this block still carries
+# all four files), so this is belt-and-braces, not a fix for a live bug -- but
+# auto-inclusion is version-dependent behaviour and these files are the
+# difference between a working reliability reader and a silent degrade to
+# curated-only. Cheap to state, expensive to lose. Keep the *.jsonl.gz glob:
+# it covers the bundled corpus_eval measured snapshot.
+"skidl_eda.diagnostics" = ["data/*.jsonl", "data/*.jsonl.gz", "data/README.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
