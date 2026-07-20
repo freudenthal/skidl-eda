@@ -218,8 +218,35 @@ def _hit_simulatability(hit):
         return None
 
 
+def _terminal_lines(terminals) -> list:
+    """Render an empirical terminal-verification verdict (F3), or []."""
+    if terminals is None:
+        return []
+    tv = terminals
+    if getattr(tv, "timed_out", False):
+        return ["  verify-terminals: TIMEOUT (subckt did not converge in time) "
+                "-- treat the 10/20/30 heuristic as UNVERIFIED"]
+    if tv.error:
+        return [f"  verify-terminals: could not verify [{tv.error}] "
+                "-- treat terminal identity as heuristic"]
+    if not tv.applicable:
+        return []
+    if not tv.verified:
+        return [f"  verify-terminals: UNVERIFIED -- {tv.note}"]
+    # a clean, empirically-measured map: print it as authoritative
+    order = ("D", "G", "S") if tv.family in ("nmos", "pmos", "njf", "pjf") \
+        else ("C", "B", "E")
+    node_of = {role: node for node, role in (tv.roles or {}).items()}
+    mapping = " ".join(f"{node_of[r]}={r}" for r in order if r in node_of)
+    return [
+        f"  verify-terminals: VERIFIED ({tv.family.upper()}) -- {mapping} "
+        f"[measured on ngspice, not a heuristic]",
+        f"  #   {tv.note}",
+    ]
+
+
 def _print_hit(hit, models_dir, license_tier, verify=None, type_unverified=False,
-               symbol_pins=None, symbol_id=None):
+               symbol_pins=None, symbol_id=None, terminals=None):
     rel = hit.path
     try:
         rel = os.path.relpath(hit.path, models_dir)
@@ -270,6 +297,9 @@ def _print_hit(hit, models_dir, license_tier, verify=None, type_unverified=False
     if rl:
         print(rl)
     for ln in _subckt_terminal_lines(hit):
+        print(ln)
+    # F3: an empirical --verify-terminals map supersedes the heuristic above.
+    for ln in _terminal_lines(terminals):
         print(ln)
     if hit.header:
         first = [ln for ln in hit.header.splitlines() if ln.strip("* ").strip()][:5]
@@ -324,6 +354,11 @@ def main(argv=None) -> int:
     ap.add_argument("--limit", type=int, default=20, help="max results (default 20)")
     ap.add_argument("--verify", action="store_true",
                     help="smoke-test each shown model against ngspice")
+    ap.add_argument("--verify-terminals", dest="verify_terminals",
+                    action="store_true",
+                    help="for a 3-node FET/BJT subckt, DRIVE it on ngspice to "
+                         "recover which node is Drain/Gate/Source (Collector/"
+                         "Base/Emitter) instead of trusting the 10/20/30 heuristic")
     ap.add_argument("--simulatable-only", action="store_true",
                     help="hide hits whose model class ngspice cannot run "
                          "(XSPICE digital, PSpice U-device, encrypted)")
@@ -406,8 +441,14 @@ def main(argv=None) -> int:
         # Bounded verify (subprocess + timeout) so a non-converging op-point on a
         # subckt MOSFET can't eat the whole shell timeout (A4).
         verify = SL.smoke_test_bounded(hit.name, models_dir) if args.verify else None
+        terminals = (
+            SL.verify_terminals_bounded(hit.name, models_dir)
+            if args.verify_terminals and hit.kind == "subckt" and hit.nodes
+            and len(hit.nodes) == 3 else None
+        )
         _print_hit(hit, models_dir, lic, verify, type_unverified=type_unverified,
-                   symbol_pins=symbol_pins, symbol_id=args.symbol)
+                   symbol_pins=symbol_pins, symbol_id=args.symbol,
+                   terminals=terminals)
 
     # One caveat per run (A3): "LOADS + converges" is a single-device op-point
     # check -- it does not promise transient robustness in a feedback loop.

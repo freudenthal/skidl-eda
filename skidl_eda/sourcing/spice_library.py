@@ -401,6 +401,210 @@ def smoke_test(name: str, models_dir: Optional[str] = None,
     return res
 
 
+# --------------------------------------------------------------------------- #
+# Terminal-identity verification for 3-node FET/BJT subckts (finding F3)       #
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class TerminalVerdict:
+    """Empirically-determined terminal roles of a 3-node transistor subckt.
+
+    ``applicable`` is False for anything not a 3-node subckt (a bare ``.model``
+    needs no mapping; op-amps and other subckts aren't transistors). ``verified``
+    is True when a clean transistor signature emerged and every role was pinned.
+    ``roles`` maps subckt node -> role (``D``/``G``/``S`` or ``C``/``B``/``E``).
+    """
+
+    name: str
+    applicable: bool = False
+    verified: bool = False
+    roles: Optional[dict] = None
+    family: str = ""  # nmos | pmos | njf | pjf | npn | pnp
+    note: str = ""
+    error: str = ""
+    timed_out: bool = False
+
+
+def verify_terminals(name: str, models_dir: Optional[str] = None,
+                     compat: str = "psa") -> TerminalVerdict:
+    """Drive a 3-node transistor subckt on ngspice to recover its terminal roles.
+
+    The tool knows a subckt's node *order* but not each node's *identity* (which
+    is Drain/Gate/Source) -- today it hands over a heuristic (``10=D 20=G 30=S``)
+    that, if wrong, gives a converged-but-wrong result with no error (finding F3).
+    This probe determines the identity empirically, with NO per-part tables:
+
+    * **control terminal (G/B):** for each node taken as the control, a DC sweep
+      of that node modulates the current through the other two. The control is the
+      node with real transconductance (the sweep swings the power current) whose
+      OWN current stays far below the power current -- a MOSFET gate draws ~0, a
+      BJT base draws Ic/beta, while a drain/source (collector/emitter) carries the
+      full channel current. That ratio uniquely picks it out.
+    * **polarity + family:** whether the ON side of the control sweep is positive
+      (n-type) or negative (p-type); control current ~0 => FET, else BJT.
+    * **drain/source (collector/emitter):** with the control OFF, the intrinsic
+      body diode (FET) conducts only when the SOURCE is the higher node; for a BJT
+      the forward >> reverse current gain (control ON) marks the collector.
+
+    Returns a :class:`TerminalVerdict`. ``applicable=False`` (no error) for a bare
+    ``.model`` or a non-3-node subckt. Any ngspice failure returns
+    ``verified=False`` with a note -- an honest "couldn't verify", never a guess
+    dressed as a fact.
+    """
+    import numpy as np
+
+    index = build_catalog(models_dir)
+    if index is None:
+        return TerminalVerdict(name, error="corpus not available")
+    hit = index.resolve(name)
+    if hit is None:
+        return TerminalVerdict(name, error="not found in index")
+    if hit.kind != "subckt" or not hit.nodes or len(hit.nodes) != 3:
+        return TerminalVerdict(
+            name, applicable=False,
+            note="terminal verification applies to 3-node transistor subckts; "
+                 "a bare .model needs no pin mapping",
+        )
+
+    import skidl.sim.simulator as S  # noqa: F401 - configures ngspice
+    from PySpice.Spice.NgSpice.Shared import NgSpiceShared
+
+    shared = NgSpiceShared.new_instance()
+    S._ensure_codemodels(shared)
+    if compat:
+        try:
+            shared.exec_command(f"set ngbehavior={compat}")
+        except Exception:  # pragma: no cover
+            pass
+    import logging as _lg
+
+    ng_log = _lg.getLogger("PySpice.Spice.NgSpice.Shared.NgSpiceShared")
+    prev = ng_log.level
+    ng_log.setLevel(_lg.CRITICAL)
+
+    nodes = list(hit.nodes)
+    header = _smoke_header(hit) or f'.include "{_safe_path(hit.path).replace(os.sep, "/")}"'
+
+    def _run(extra_lines, analysis):
+        try:
+            shared.exec_command("reset")
+        except Exception:  # pragma: no cover
+            pass
+        deck = [".title tverify", header] + extra_lines + [analysis, ".end", ""]
+        shared.load_circuit("\n".join(deck))
+        shared.run()
+        pl = shared.plot(None, shared.last_plot)
+        keys = {k.lower(): k for k in pl.keys()}
+
+        def vec(n):
+            k = keys.get(n.lower())
+            if k is None:
+                return None
+            return np.asarray(pl[k].to_waveform(), dtype=float)
+
+        return vec
+
+    def _xline(role_of):
+        # role_of: {node_index: netname}; emit X with nodes in subckt order.
+        return "X1 " + " ".join(role_of[i] for i in range(3)) + f" {hit.name}"
+
+    try:
+        # --- 1. identify the control (gate/base) node ----------------------
+        best = None  # (gm, ratio, on_sign, ctl_idx)
+        for ctl in range(3):
+            a, b = [i for i in range(3) if i != ctl]
+            role = {a: "A", b: "B", ctl: "C"}
+            extra = ["Vhi ND 0 10", "Rload ND A 100", "Vlo B 0 0", "Vg C 0 0",
+                     _xline(role)]
+            vec = _run(extra, ".dc Vg -12 12 0.25")
+            ipow, ictl, sweep = vec("vhi#branch"), vec("vg#branch"), vec("v-sweep")
+            if ipow is None or ictl is None:
+                continue
+            gm = float(np.ptp(ipow))
+            ipmax = float(np.max(np.abs(ipow)))
+            icmax = float(np.max(np.abs(ictl)))
+            ratio = icmax / max(ipmax, 1e-15)
+            # ON side: which sweep polarity carries more power current.
+            on_sign = 0
+            if sweep is not None and sweep.size == ipow.size:
+                hi = float(np.abs(ipow[sweep > 6]).mean()) if np.any(sweep > 6) else 0.0
+                lo = float(np.abs(ipow[sweep < -6]).mean()) if np.any(sweep < -6) else 0.0
+                on_sign = 1 if hi >= lo else -1
+            if ratio < 0.5 and gm > 1e-4:
+                if best is None or gm > best[0]:
+                    best = (gm, ratio, on_sign, ctl)
+        if best is None:
+            return TerminalVerdict(
+                name, applicable=True, verified=False,
+                note="no transistor signature (no terminal modulates the other "
+                     "two like a gate/base); not a 3-terminal FET/BJT, or it did "
+                     "not converge",
+            )
+        _gm, ratio, on_sign, g = best
+        is_fet = ratio < 1e-3
+        n_type = on_sign >= 0
+        family = ("nmos" if n_type else "pmos") if is_fet else ("npn" if n_type else "pnp")
+        pwr = [i for i in range(3) if i != g]
+
+        # --- 2. distinguish the two power terminals (D/S or C/E) -----------
+        src_idx = None
+        if is_fet:
+            # control OFF: the body diode conducts only when SOURCE is the +node.
+            off = "0"
+            a, b = pwr
+            currents = {}
+            for hi in (a, b):
+                lo = b if hi == a else a
+                role = {hi: "P", lo: "Q", g: "G"}
+                extra = [f"Vs ND 0 {'-5' if not n_type else '5'}",
+                         "Rl ND P 10", "Vq Q 0 0", f"Vg G 0 {off}",
+                         _xline(role)]
+                vec = _run(extra, ".op")
+                iv = vec("vs#branch")
+                currents[hi] = abs(float(iv[-1])) if iv is not None else 0.0
+            # body-diode anode = source = the +node that conducts more
+            src_idx = a if currents.get(a, 0) >= currents.get(b, 0) else b
+        else:
+            # BJT: forward beta >> reverse beta. Base ON (mid); the orientation
+            # with the larger collector current has the COLLECTOR as the +node.
+            a, b = pwr
+            von = "0.75" if n_type else "-0.75"
+            currents = {}
+            for hi in (a, b):
+                lo = b if hi == a else a
+                role = {hi: "P", lo: "Q", g: "G"}
+                extra = [f"Vs ND 0 {'5' if n_type else '-5'}",
+                         "Rl ND P 100", "Vq Q 0 0",
+                         f"Rb G {lo} 10k" if False else f"Vg G 0 {von}",
+                         _xline(role)]
+                vec = _run(extra, ".op")
+                iv = vec("vs#branch")
+                currents[hi] = abs(float(iv[-1])) if iv is not None else 0.0
+            col_idx = a if currents.get(a, 0) >= currents.get(b, 0) else b
+            # for a BJT the collector is the high-forward-gain +node; source_idx
+            # slot reused as "emitter" below.
+            emit_idx = b if col_idx == a else a
+            roles = {nodes[g]: "B", nodes[col_idx]: "C", nodes[emit_idx]: "E"}
+            return TerminalVerdict(
+                name, applicable=True, verified=True, roles=roles, family=family,
+                note=f"{family.upper()} bipolar; base by transconductance, "
+                     f"collector by forward-beta asymmetry",
+            )
+
+        drn_idx = pwr[0] if pwr[1] == src_idx else pwr[1]
+        roles = {nodes[g]: "G", nodes[drn_idx]: "D", nodes[src_idx]: "S"}
+        return TerminalVerdict(
+            name, applicable=True, verified=True, roles=roles, family=family,
+            note=f"{family.upper()} FET; gate by transconductance, source by "
+                 f"body-diode asymmetry",
+        )
+    except Exception as e:  # noqa: BLE001 - a probe failure is an honest non-verify
+        return TerminalVerdict(name, applicable=True, verified=False,
+                               error=f"{type(e).__name__}: {str(e)[:140]}")
+    finally:
+        ng_log.setLevel(prev)
+
+
 # A tiny driver run in a *subprocess* so a hung ngspice can be killed (A4). The
 # ngspice shared library runs in-process and cannot be interrupted by a thread
 # timeout, so isolation is the only way to bound the wall clock.
@@ -456,6 +660,54 @@ def smoke_test_bounded(name: str, models_dir: Optional[str] = None,
         d["name"], bool(d["loaded"]), bool(d["converged"]),
         kind=d.get("kind", ""), device_type=d.get("device_type", ""),
         path=d.get("path", ""), error=d.get("error", ""),
+    )
+
+
+_BOUNDED_TERM_DRIVER = (
+    "import json,sys;"
+    "from skidl_eda.sourcing.spice_library import verify_terminals;"
+    "a=json.load(sys.stdin);"
+    "r=verify_terminals(a['name'],a.get('models_dir'),a.get('compat','psa'));"
+    "print(json.dumps({'name':r.name,'applicable':r.applicable,"
+    "'verified':r.verified,'roles':r.roles,'family':r.family,'note':r.note,"
+    "'error':r.error}))"
+)
+
+
+def verify_terminals_bounded(name: str, models_dir: Optional[str] = None,
+                             compat: str = "psa",
+                             timeout_s: float = 45.0) -> TerminalVerdict:
+    """Like :func:`verify_terminals` but killed after ``timeout_s`` seconds (F3).
+
+    The probe drives several ngspice op-points/sweeps; a stiff subckt that never
+    converges is isolated in a subprocess so it can be terminated instead of
+    hanging the CLI. On timeout, a distinct ``timed_out=True`` verdict."""
+    import json
+    import subprocess
+    import sys
+
+    payload = json.dumps({"name": name, "models_dir": models_dir, "compat": compat})
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _BOUNDED_TERM_DRIVER],
+            input=payload, capture_output=True, text=True, timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        return TerminalVerdict(name, applicable=True, verified=False,
+                               error=f"terminal verify timed out (>{timeout_s:g}s)",
+                               timed_out=True)
+    if proc.returncode != 0:
+        tail = (proc.stderr or "").strip().splitlines()[-1:] or [""]
+        return TerminalVerdict(name, error=f"verify subprocess failed: {tail[0][:120]}")
+    line = (proc.stdout or "").strip().splitlines()[-1:] or [""]
+    try:
+        d = json.loads(line[0])
+    except Exception:  # noqa: BLE001
+        return TerminalVerdict(name, error="verify: could not parse subprocess result")
+    return TerminalVerdict(
+        d["name"], applicable=bool(d.get("applicable")),
+        verified=bool(d.get("verified")), roles=d.get("roles"),
+        family=d.get("family", ""), note=d.get("note", ""), error=d.get("error", ""),
     )
 
 
