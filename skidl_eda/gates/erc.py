@@ -34,6 +34,29 @@ from .kicad_cli import KicadCliUnavailable, find_kicad_cli
 
 logger = logging.getLogger(__name__)
 
+
+class _PinDiscoveryNoiseFilter(logging.Filter):
+    """Drop kicad-sch-api's benign per-ref 'Component not found' / PIN_DISCOVERY
+    warnings during the PWR_FLAG autofix (F7), counting how many were dropped.
+
+    The autofix probes a pin position / wires a flag, and when the anchor ref
+    isn't in the currently-loaded sheet it falls back to the ERC-reported
+    coordinates -- a normal path, not a failure. Those failure-shaped warnings
+    read like mid-pipeline errors on an otherwise clean gate, so they are
+    suppressed here and replaced with one honest summary line.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.dropped = 0
+
+    def filter(self, record):
+        msg = record.getMessage()
+        if "Component not found" in msg or "[PIN_DISCOVERY]" in msg:
+            self.dropped += 1
+            return False
+        return True
+
 # Violation types the (future) autofix repairs; everything else is report-only.
 AUTOFIX_TYPES = {"power_pin_not_driven"}
 
@@ -406,50 +429,84 @@ def _apply_power_flag_autofixes(
             continue
         net_pins.setdefault(net, []).append((ref, pin, file, pos))
 
+    # Quiet kicad-sch-api's benign per-ref "Component not found" warnings while we
+    # probe pin positions / wire flags (F7): the autofix falls back cleanly, so
+    # those failure-shaped lines are noise on a passing gate. One summary instead.
+    # A logging Filter is only consulted for records logged *directly* to a logger
+    # -- NOT for a child's records propagating up -- so attach it to every existing
+    # kicad_sch_api.* logger (the "Component not found" line comes from the
+    # core.managers.wire child), not just the namespace root.
+    _noise = _PinDiscoveryNoiseFilter()
+    _ksa_names = {
+        n for n in list(logging.Logger.manager.loggerDict)
+        if n == "kicad_sch_api" or n.startswith("kicad_sch_api.")
+    }
+    # Include the known emitters explicitly (getLogger creates them if a module
+    # imports later, and returns the same instance carrying this filter).
+    _ksa_names |= {
+        "kicad_sch_api.collections.components",   # [PIN_DISCOVERY] Component not found
+        "kicad_sch_api.core.managers.wire",       # Component not found: <ref>
+        "kicad_sch_api.core.components",
+    }
+    _ksa_loggers = [logging.getLogger(n) for n in _ksa_names]
+    for _lg in _ksa_loggers:
+        _lg.addFilter(_noise)
     added = 0
-    for net in sorted(net_pins):
-        # Deterministic anchor: sort by (ref, pin, file), take the first.
-        ref, pin, file, item_pos = sorted(net_pins[net])[0]
-        fs = _load(file)
-        sch = fs["sch"]
-        pos = sch.get_component_pin_position(ref, pin)
-        if pos is not None:
-            px, py = pos.x, pos.y
-        elif item_pos and item_pos[0] is not None and item_pos[1] is not None:
-            px, py = item_pos
-        else:
-            logger.debug("ERC autofix: no pin position for %s pin %s; skipping", ref, pin)
-            continue
+    try:
+        for net in sorted(net_pins):
+            # Deterministic anchor: sort by (ref, pin, file), take the first.
+            ref, pin, file, item_pos = sorted(net_pins[net])[0]
+            fs = _load(file)
+            sch = fs["sch"]
+            pos = sch.get_component_pin_position(ref, pin)
+            if pos is not None:
+                px, py = pos.x, pos.y
+            elif item_pos and item_pos[0] is not None and item_pos[1] is not None:
+                px, py = item_pos
+            else:
+                logger.debug(
+                    "ERC autofix: no pin position for %s pin %s; skipping", ref, pin)
+                continue
 
-        # Canonical flag point for this net. Deterministic (same net -> same anchor
-        # -> same point), so an existing flag here means the net is already flagged.
-        flag_pos = (px, py + 5.08)
-        if _pt_key(*flag_pos) in fs["occupied"]:
-            logger.debug(
-                "ERC autofix: canonical flag point for net %r already occupied "
-                "(via %s pin %s); skipping to avoid stacking",
-                net, ref, pin,
+            # Canonical flag point for this net. Deterministic (same net -> same
+            # anchor -> same point), so an existing flag here means already-flagged.
+            flag_pos = (px, py + 5.08)
+            if _pt_key(*flag_pos) in fs["occupied"]:
+                logger.debug(
+                    "ERC autofix: canonical flag point for net %r already occupied "
+                    "(via %s pin %s); skipping to avoid stacking",
+                    net, ref, pin,
+                )
+                continue
+
+            flag_ref = f"#FLG{flag_index:02d}"
+            flag_index += 1
+            sch.components.add(
+                "power:PWR_FLAG",
+                reference=flag_ref,
+                value="PWR_FLAG",
+                position=flag_pos,
             )
-            continue
-
-        flag_ref = f"#FLG{flag_index:02d}"
-        flag_index += 1
-        sch.components.add(
-            "power:PWR_FLAG",
-            reference=flag_ref,
-            value="PWR_FLAG",
-            position=flag_pos,
-        )
-        fs["occupied"].add(_pt_key(*flag_pos))
-        wire = sch.add_wire_between_pins(ref, pin, flag_ref, "1")
-        if wire is None:
-            logger.debug("ERC autofix: could not wire PWR_FLAG to %s pin %s", ref, pin)
-            continue
-        fs["dirty"] = True
-        added += 1
-        logger.info(
-            "ERC autofix: added PWR_FLAG on net '%s' (via %s pin %s in %s)",
-            net, ref, pin, Path(file).name,
+            fs["occupied"].add(_pt_key(*flag_pos))
+            wire = sch.add_wire_between_pins(ref, pin, flag_ref, "1")
+            if wire is None:
+                logger.debug(
+                    "ERC autofix: could not wire PWR_FLAG to %s pin %s", ref, pin)
+                continue
+            fs["dirty"] = True
+            added += 1
+            logger.info(
+                "ERC autofix: added PWR_FLAG on net '%s' (via %s pin %s in %s)",
+                net, ref, pin, Path(file).name,
+            )
+    finally:
+        for _lg in _ksa_loggers:
+            _lg.removeFilter(_noise)
+    if _noise.dropped:
+        logger.debug(
+            "ERC autofix: suppressed %d benign kicad-sch-api 'Component not found' "
+            "pin-discovery message(s) (anchors resolved via fallback)",
+            _noise.dropped,
         )
 
     for fs in loaded.values():

@@ -480,17 +480,17 @@ def main(argv=None) -> int:
             print(f"# could not copy into store: {exc}", file=sys.stderr)
 
     print(f"# {len(hits)} match(es) in {models_dir}", file=sys.stderr)
-    # If SKIDL_SPICE_LIB_PATH is unset in this shell, note how auto-resolve is
-    # wired -- WITHOUT the old scare that it "will NOT fire in simulations"
-    # (false: skidl_eda.setup_kicad10() auto-defaults the var at build time, so
-    # every generate()/skill flow that calls it resolves value="<NAME>" already).
+    # We only get here because the corpus WAS located (models_dir is real), so the
+    # auto-default would fire -- lead with that, not with "unset" scare wording
+    # (F6). skidl_eda.setup_kicad10() sets SKIDL_SPICE_LIB_PATH at build time, so
+    # value="<NAME>" auto-resolves in every generate()/skill flow already.
     if not lib_env_was_set:
         print(
-            f"note: SKIDL_SPICE_LIB_PATH is unset in this shell. "
-            f"skidl_eda.setup_kicad10() auto-defaults it to the corpus at build "
-            f"time, so value=\"<NAME>\" auto-resolves in any generate()/skill flow. "
-            f"Only a bare skidl script that never calls setup_kicad10() needs to "
-            f"set it to {models_dir} (or add the explicit Sim_Library= line above).",
+            f"note: the corpus was auto-located at {models_dir}, so "
+            f"value=\"<NAME>\" auto-resolves at build time (setup_kicad10() sets "
+            f"SKIDL_SPICE_LIB_PATH for you). SKIDL_SPICE_LIB_PATH is unset only in "
+            f"THIS bare shell -- nothing to fix for a generate()/skill flow; set it "
+            f"yourself only for a bare skidl script that never calls setup_kicad10().",
             file=sys.stderr,
         )
     return 0
