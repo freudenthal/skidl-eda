@@ -445,6 +445,26 @@ entry point and the `Sim_*` attribute spelling differ.
   (`transient_analysis(stiff=True, use_initial_condition=True)`) so it starts from
   a defined state. Worked example: `canaries/dff_divider/`. Limitations: async
   set/reset and real fan-out/drive-strength are not modeled.
+- **Triggered-breakdown / negative-resistance devices (avalanche transistor,
+  spark gap, SCR/DIAC).** ngspice models none of these natively (Gummel-Poon has
+  no avalanche), and the usual convergence advice is **actively wrong** for a
+  triggered, bistable core. Use `Sim_Device="TRIGSW"` (aliases `"SPARKGAP"`/
+  `"DIAC"`/`"AVSW"`) — one behavioral smooth-conductance switch. Terminals: power
+  `P`(+)/`N`(−) by pin name (A/anode/C/collector and K/cathode/E/emitter) or
+  `Sim_Pins="2=P 1=G 3=N"`; a third control pin `G` makes it **externally
+  triggered** on the **ground-referenced** node `V(G)` (avalanche BJT / SCR gate),
+  two terminals make it **self-triggered** on `V(P,N)` (spark gap). Rules that
+  cost hours to rediscover — bake them in: **(1) reference the trigger to GROUND,
+  not the switch terminals** (an emitter-referenced trigger fails when the power−
+  terminal floats on leakage); **(2) op-point start, NOT `use_initial_condition`**
+  (the gated conductance is ≈off at DC, so it has ONE clean DC solution — a
+  latched state node is bistable and can solve stuck-ON); **(3) smooth conductance,
+  not an ideal `sw`** (an `sw` collapses the timestep in the resonant loop); **(4)
+  a reverse catch diode** (anode→GND, cathode→node) clamps the L-C negative
+  overshoot; **(5) the ns pulse SHAPE is set by the EXTERNAL L-C loop**
+  (`Ipeak ≈ (Vrail−Vf)/√(Lloop/Cstore)`), not the model. `Sim_Params="vt=2.5
+  ron=1.2 width=0.05 rleak=100meg"` (optional `vhold=` adds a smooth quench).
+  Worked example + multi-pulse repeatability: `canaries/trig_pulser/`.
 - **Linear regulators / LDOs** (`Regulator_Linear:*`, or any part with
   `Sim_Device="LDO"`) simulate as a datasheet-parameterized behavioral
   macromodel. Give it `Sim_Params="vout=3.3 vdrop=0.3 rser=0.1 iq=2m"` (only
