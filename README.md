@@ -290,10 +290,35 @@ single-instance test and still collapse in a multi-instance loop — see LMC6482
   (follower / inverting G=−10 / open-loop rail / AC→GBW), **diode** (Vf@1mA,
   leakage, Vz), **BJT** (β, Vbe), **MOSFET/FET** (Vth/gm/Rds_on — with
   name-match → IR 10/20/30 → permutation-trial terminal identity), **LDO**
-  (line/load/dropout; >3-terminal parts honestly `untestable-generic`).
+  (line/load/dropout; >3-terminal parts honestly `untestable-generic`),
+  **twoterm** and **threeterm** (below).
   Status is `pass` / `partial` / `fail` / `untestable-generic` / `untested`.
 - `transient_loop` — always `"untested"` (Phase 2, not built): the standing hedge
   in every record and the report header.
+
+**`twoterm` / `threeterm`** cover the ~19k 2- and 3-node subckts that used to
+fall through to the formula-less generic `subckt` class:
+
+- **`twoterm`** (2 nodes) — an AC driving-point impedance sweep (a 1 A AC source
+  makes `V(a)` numerically equal to Z(f)) plus a DC I–V sweep classify the part
+  into `z_kind` = `inductive` / `capacitive` / `resistive` / `resonant` /
+  `rectifying` / `clamping` / `zener` / `open`, and measure `l_h` / `c_f` /
+  `r_ohm` / `srf_hz` / `vf_v` / `vz_v` / `vclamp_*`. When the part name encodes
+  its nominal (`4532_7447669168_68u` → 68 µH) that becomes a real pass/fail
+  target at **±30 %** — the same idea as `LM7805` → 5 V. Kind is decided by a
+  phase *plurality* over the midband, not a majority: a real 68 µH inductor
+  reads resistive below its DCR corner and capacitive above its SRF, so it is
+  inductive over barely half the sweep.
+- **`threeterm`** (3 nodes, not already claimed by `mosfet`/`ldo`) — a bounded
+  15-bench cascade: a 6-permutation FET trial → a 6-permutation regulator trial
+  → 3 pairwise impedance probes. `z_kind=transistor` means *a 3-terminal
+  controlled conductor* (FET/BJT/triode/SCR-like), not an identified device
+  family. A passive network is `partial`, never `pass` — a pairwise impedance
+  measurement does not verify what the part is *for*.
+
+**Not built on purpose:** ≥4-node behavioral parts get no profile. Generic
+stimulus on an IR2104-class part yields confident *false* verdicts, so they stay
+honestly `untested` / `untestable-generic`.
 
 Output (in `.claude/memory/` by default): `corpus_eval_results.jsonl` (the
 exhaustive machine-readable store) + `corpus_eval_report.md` (a summarized,

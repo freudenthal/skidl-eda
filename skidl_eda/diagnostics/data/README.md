@@ -90,6 +90,39 @@ object per line, keyed by `part` + `harness_version`, sorted by part:
 The `transient_loop` tier is always `"untested"` (single-instance tests never
 prove multi-instance loop robustness); consumers must keep that hedge.
 
+The `functional` metric keys are per eval class. For the two node-count classes
+(`twoterm` = any 2-node subckt, `threeterm` = any 3-node one not already claimed
+by `mosfet`/`ldo`) the discriminating key is **`z_kind`**:
+
+| `eval_class` | `z_kind` | other metric keys |
+|---|---|---|
+| `twoterm` | `inductive` | `l_h`, `r_dc_ohm`, `srf_hz` |
+| `twoterm` | `capacitive` | `c_f`, `srf_hz` |
+| `twoterm` | `resistive` | `r_ohm`, `r_dc_ohm` |
+| `twoterm` | `resonant` | `z_1khz_ohm`, `srf_hz` |
+| `twoterm` | `rectifying` | `vf_v` |
+| `twoterm` | `zener` | `vz_v`, `vf_v` |
+| `twoterm` | `clamping` | `vclamp_pos_v`, `vclamp_neg_v` |
+| `twoterm` | `open` | — (always `status: fail`) |
+| `threeterm` | `transistor` | `vth_v`, `gm_s` |
+| `threeterm` | `regulator` | `vout_v`, `line_reg_mv_per_v` |
+| `threeterm` | `network` | `z01_1khz_ohm`, `z02_1khz_ohm`, `z12_1khz_ohm` |
+
+Two `twoterm` conventions worth knowing when reading records:
+
+- **Nominal from the part name.** ~24 % of 2-node parts encode their value in a
+  trailing name token (`4532_7447669168_68u` → 68 µH, `1210_744032002_2.2u` →
+  2.2 µF/µH). When one parses it is stored as `nominal` and compared to the
+  measured `l_h`/`c_f`/`r_ohm` at a **±30 %** tolerance; a miss downgrades the
+  record to `partial` with a caveat carrying both numbers. A *bare* numeric tail
+  is a manufacturer part number, not a nominal, and is ignored. R-notation
+  (`_4R7`) fixes only the mantissa, so it is compared for resistive parts only.
+- `z_kind: transistor` on a `threeterm` record means *a 3-terminal controlled
+  conductor* — FET, BJT, triode, SCR-like — identified by permutation trial. The
+  generic bench does not identify the device family, and `vth_v`/`gm_s` are
+  bench readings, not datasheet parameters. `z_kind: network` is always
+  `partial`, never `pass`: an impedance measurement does not verify function.
+
 Records also carry two validity hashes:
 
 - `file_hash` — blake2b of the model file's bytes; proves the record still

@@ -336,6 +336,9 @@ def main(argv=None) -> int:
         "mosfet": "load/op failed or terminals unresolved",
         "jfet": "load/op failed",
         "ldo": "load/op failed",
+        "twoterm": "2-node subckt whose Z(f)/I-V benches did not converge",
+        "threeterm": "3-node subckt that matched no probe in the cascade "
+                     "(transistor -> regulator -> pairwise network)",
     }
     for cls, n in by_class.most_common():
         L.append(f"| {cls} | {n} | {notes.get(cls, '')} |")

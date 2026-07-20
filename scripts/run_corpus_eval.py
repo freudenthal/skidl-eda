@@ -99,16 +99,22 @@ def _metric_str(rec) -> str:
     """One or two salient functional numbers for the per-part line."""
     f = (rec.get("tiers", {}).get("functional") or {})
     order = ["beta", "vf_1ma_v", "gbw_hz", "vth_v", "rds_on_ohm", "vout_v",
-             "idss_a", "follower_vout", "inv_gain"]
+             "idss_a", "l_h", "c_f", "r_ohm", "vz_v", "vf_v", "srf_hz",
+             "z_1khz_ohm", "follower_vout", "inv_gain"]
     label = {"beta": "β", "vf_1ma_v": "Vf", "gbw_hz": "GBW", "vth_v": "Vth",
              "rds_on_ohm": "Rds", "vout_v": "Vout", "idss_a": "Idss",
+             "l_h": "L", "c_f": "C", "r_ohm": "R", "vz_v": "Vz", "vf_v": "Vf",
+             "srf_hz": "SRF", "z_1khz_ohm": "Z1k",
              "follower_vout": "flw", "inv_gain": "G"}
     out = []
+    kind = f.get("z_kind")
+    if isinstance(kind, str):
+        out.append(kind)
     for k in order:
         v = f.get(k)
         if isinstance(v, (int, float)) and not isinstance(v, bool):
             out.append(f"{label[k]}={_fmt_num(v)}")
-        if len(out) >= 2:
+        if len(out) >= 3:
             break
     return " ".join(out)
 
@@ -175,7 +181,7 @@ def build_argparser() -> argparse.ArgumentParser:
         description="Watchable runner for the corpus_eval reliability sweep.")
     ap.add_argument("--type", dest="type_", default="all",
                     choices=["opamp", "diode", "bjt", "mosfet", "jfet", "ldo",
-                             "subckt", "all"],
+                             "twoterm", "threeterm", "subckt", "all"],
                     help="eval class to sweep (default: all)")
     ap.add_argument("--only", help="restrict to parts whose name contains this")
     ap.add_argument("--limit", type=int, help="cap the total number of parts")

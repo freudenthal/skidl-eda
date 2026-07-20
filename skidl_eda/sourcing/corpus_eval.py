@@ -51,7 +51,8 @@ from ..diagnostics.knowledge_base import resolve_memory_dir
 HARNESS_VERSION = 2
 
 # eval classes with a (future or present) functional profile.
-_CLASSES = ["opamp", "diode", "bjt", "mosfet", "jfet", "ldo", "subckt"]
+_CLASSES = ["opamp", "diode", "bjt", "mosfet", "jfet", "ldo", "twoterm",
+            "threeterm", "subckt"]
 _ALL_CLASSES = _CLASSES  # what --type all sweeps (excludes non-semiconductor "other")
 
 
@@ -101,10 +102,12 @@ def classify_eval_class(hit) -> str:
 
     ``.model`` cards map by device type (disjoint). Subckts are classified by
     name/node shape: LDO name -> ``ldo``; power-FET shape -> ``mosfet``; a 5-node
-    subckt -> ``opamp`` (the near-universal op-amp order); anything else ->
-    ``subckt`` (generic -- dialect/loads/op still measured, functional
-    untestable-generic). Non-semiconductor ``.model`` cards (R/C/L/SW/CAP ...)
-    return ``"other"`` and are skipped.
+    subckt -> ``opamp`` (the near-universal op-amp order); a 2-node subckt ->
+    ``twoterm`` and a 3-node one -> ``threeterm`` (probe-cascade profiles, see
+    ``_score_twoterm`` / ``_score_threeterm``); anything else -> ``subckt``
+    (generic -- dialect/loads/op still measured, functional untested).
+    Non-semiconductor ``.model`` cards (R/C/L/SW/CAP ...) return ``"other"``
+    and are skipped.
     """
     if hit.kind == "model":
         dt = (hit.device_type or "").upper()
@@ -127,6 +130,10 @@ def classify_eval_class(hit) -> str:
         return "ldo"
     if len(nodes) == 5:
         return "opamp"
+    if len(nodes) == 2:
+        return "twoterm"
+    if len(nodes) == 3:
+        return "threeterm"
     return "subckt"
 
 
@@ -523,6 +530,17 @@ _CLASS_FNS = {
     "jfet": ["_jfet_bench", "_score_jfet", "_id_curve"],
     "ldo": ["_ldo_benches", "_ldo_candidates", "_ldo_nominal_v", "_ldo_x_line",
             "_score_ldo"],
+    # NOTE (hash trap): these lists MUST stay non-empty. harness_hash(cls) is
+    # built from _SHARED_FNS + _CLASS_FNS[cls]; _CLASS_FNS["subckt"] is empty,
+    # so an empty "twoterm"/"threeterm" list would hash IDENTICALLY to "subckt"
+    # and --resume would silently skip every reclassified 2/3-node part instead
+    # of re-running it. Non-empty => the hashes differ => surgical invalidation.
+    "twoterm": ["_twoterm_benches", "_score_twoterm", "_twoterm_nominal",
+                "_twoterm_z", "_twoterm_iv", "_v_at_i", "_linear_r",
+                "_extremum_freq", "_scalar"],
+    "threeterm": ["_threeterm_benches", "_score_threeterm", "_twoterm_z",
+                  "_id_curve", "_transistor_like", "_fet_metrics",
+                  "_finalize_fet", "_ldo_nominal_v", "_scalar"],
     "subckt": [],
 }
 
@@ -832,6 +850,528 @@ def _ldo_benches(hit) -> List[Dict[str, Any]]:
     return out
 
 
+# ---- Two-terminal subckt benches (57% of the former generic-subckt gap) ---- #
+#
+# A 2-node subckt is a passive/protective part: inductor, capacitor, resistor,
+# ferrite bead, TVS, zener, varistor, rectifier. Two benches classify all of
+# them: an AC driving-point impedance sweep (WHAT it is + R/L/C + SRF) and a DC
+# I-V sweep (whether it conducts, rectifies or clamps, and at what voltage).
+
+_TT_RSH = 1e9      # DC path to ground so a pure-C part still gets an op-point
+_TT_ROPEN = 1e8    # |Z| at or above this across the band == an open / dead part
+_TT_RSERIES = 1e3  # the I-V bench's series resistor
+
+
+def _twoterm_benches(hit) -> List[Dict[str, Any]]:
+    """AC driving-point impedance + DC I-V for a 2-node subckt.
+
+    ``zac``: a 1 A AC current source injected into node ``a`` makes ``V(a)``
+    numerically equal to Z(f). ``iv``: a swept source behind a 1 k series
+    resistor, so the current is ``(Vin - V(a))/1k`` (no branch keys needed --
+    the same trick the diode bench uses).
+    """
+    if len(hit.nodes or []) != 2:
+        return []
+    inc = _model_header(hit)
+    nm = hit.name
+    zac = "\n".join([".title zac", inc, "I1 0 a DC 0 AC 1",
+                     f"Rsh a 0 {_TT_RSH:g}", f"X1 a 0 {nm}",
+                     ".ac dec 10 1 1g", ".end", ""])
+    iv = "\n".join([".title iv", inc, "Vin s 0 0",
+                    f"R1 s a {_TT_RSERIES:g}", f"X1 a 0 {nm}",
+                    ".dc Vin -10 10 0.05", ".end", ""])
+    return [{"name": "zac", "netlist": zac, "measures": ["V(a)"]},
+            {"name": "iv", "netlist": iv, "measures": ["V(a)"]}]
+
+
+def _twoterm_z(bench, measure: str = "V(a)"):
+    """``(freqs, |Z|, phase_deg)`` from an AC driving-point bench, or None."""
+    import math
+
+    if not bench or not bench.get("converged"):
+        return None
+    axis = bench.get("axis")
+    vec = (bench.get("vectors") or {}).get(measure)
+    if not axis or not vec or len(axis) != len(vec):
+        return None
+    freqs, mags, phases = [], [], []
+    for f, v in zip(axis, vec):
+        if isinstance(v, list):
+            re_, im_ = float(v[0]), float(v[1])
+        else:
+            re_, im_ = float(v), 0.0
+        m = math.hypot(re_, im_)
+        freqs.append(float(f))
+        mags.append(m)
+        phases.append(math.degrees(math.atan2(im_, re_)) if m > 0 else 0.0)
+    return freqs, mags, phases
+
+
+def _twoterm_iv(bench, r: float = _TT_RSERIES):
+    """``[(V_across, I_through)]`` from the DC I-V bench, or None."""
+    if not bench or not bench.get("converged"):
+        return None
+    axis = bench.get("axis")
+    vec = (bench.get("vectors") or {}).get("V(a)")
+    if not axis or not vec or len(axis) != len(vec):
+        return None
+    out = []
+    for vin, va in zip(axis, vec):
+        v = float(va[0]) if isinstance(va, list) else float(va)
+        out.append((v, (float(vin) - v) / r))
+    return out
+
+
+def _v_at_i(pairs, target: float) -> Optional[float]:
+    """Interpolate the voltage across the part at signed current ``target``.
+
+    Unlike :func:`_v_at_current` this takes an explicit (V, I) curve and handles
+    BOTH sweep directions, so a reverse-conduction knee (zener/TVS) is found the
+    same way as a forward one.
+    """
+    prev = None
+    for v, i in pairs or []:
+        if prev is not None:
+            vp, ip = prev
+            if (ip < target <= i) or (ip > target >= i):
+                if i == ip:
+                    return float(v)
+                return float(vp + (target - ip) * (v - vp) / (i - ip))
+        prev = (v, i)
+    return None
+
+
+def _linear_r(pairs):
+    """``(R, relative_fit_residual)`` for a through-origin fit V = R*I, or
+    ``(None, None)`` when the curve carries no current (a blocking part)."""
+    import math
+
+    if not pairs or len(pairs) < 3:
+        return (None, None)
+    sii = sum(i * i for _v, i in pairs)
+    imax = max(abs(i) for _v, i in pairs)
+    if sii <= 0.0 or imax <= 1e-12:
+        return (None, None)
+    r = sum(v * i for v, i in pairs) / sii
+    err = math.sqrt(sum((v - r * i) ** 2 for v, i in pairs) / len(pairs))
+    scale = max(max(abs(v) for v, _i in pairs), abs(r) * imax, 1e-6)
+    return (r, err / scale)
+
+
+def _extremum_freq(freqs, mags, want_max: bool) -> Optional[float]:
+    """Frequency of a pronounced interior |Z| peak (SRF of an inductor) or dip
+    (SRF of a capacitor), or None when the response is monotone."""
+    if len(freqs) < 3:
+        return None
+    best = None
+    for k in range(1, len(freqs) - 1):
+        if want_max:
+            if mags[k] > mags[k - 1] and mags[k] > mags[k + 1]:
+                if best is None or mags[k] > mags[best]:
+                    best = k
+        else:
+            if mags[k] < mags[k - 1] and mags[k] < mags[k + 1]:
+                if best is None or mags[k] < mags[best]:
+                    best = k
+    if best is None:
+        return None
+    # Reject numerical ripple: a real resonance is a big excursion.
+    if want_max and mags[best] < 2.0 * max(min(mags), 1e-18):
+        return None
+    if not want_max and mags[best] > 0.5 * max(mags):
+        return None
+    return float(freqs[best])
+
+
+def _median(xs):
+    s = sorted(xs)
+    n = len(s)
+    if not n:
+        return None
+    return s[n // 2] if n % 2 else 0.5 * (s[n // 2 - 1] + s[n // 2])
+
+
+# A trailing name token encodes the nominal on ~24% of 2-node parts:
+# ``4532_7447669168_68u`` -> 68 uH, ``885012005027_22pF`` -> 22 pF,
+# ``..._4R7`` -> 4.7 ohm (R-notation).
+_NOM_MULT = {"p": 1e-12, "n": 1e-9, "u": 1e-6, "m": 1e-3, "k": 1e3}
+_NOM_SI_RE = re.compile(r"^(\d+(?:\.\d+)?)(p|n|u|m|k)(f|h)?$", re.IGNORECASE)
+_NOM_R_RE = re.compile(r"^(\d+)r(\d+)$", re.IGNORECASE)
+
+
+def _twoterm_nominal(name: str):
+    """``(value, unit)`` from the trailing name token, or None.
+
+    ``unit`` is ``"H"``/``"F"`` when the name spells the unit out (``_22pF``),
+    ``"ohm"`` for R-notation (``_4R7``), and ``None`` for a bare SI multiplier
+    (``_68u``) -- which is an L or C value whose unit only the MEASURED kind can
+    settle. A bare numeric tail is NOT a nominal; it is part of the
+    manufacturer's part number.
+    """
+    tok = str(name or "").replace("-", "_").split("_")[-1]
+    m = _NOM_R_RE.match(tok)
+    if m:
+        return (float(f"{m.group(1)}.{m.group(2)}"), "ohm")
+    m = _NOM_SI_RE.match(tok)
+    if not m:
+        return None
+    unit = (m.group(3) or "").upper() or None
+    return (float(m.group(1)) * _NOM_MULT[m.group(2).lower()], unit)
+
+
+# Which measured metric a parsed nominal may be compared against. A bare SI
+# nominal (unit None) is an L/C value, so it is NEVER compared to a resistance:
+# a part named "..._180u" that measures 0.67 ohm is a 180 uH inductor whose
+# midband read resistive, not a 180 microhm resistor. Comparing them produced a
+# meaningless "mismatch" and a bogus `partial`.
+_TT_NOMINAL_KEY = {("inductive", None): "l_h", ("inductive", "H"): "l_h",
+                   ("capacitive", None): "c_f", ("capacitive", "F"): "c_f",
+                   ("resistive", "ohm"): "r_ohm"}
+_TT_NOMINAL_UNIT_KIND = {"H": "inductive", "F": "capacitive", "ohm": "resistive"}
+_TT_NOMINAL_TOL = 0.30
+
+
+def _score_twoterm(hit, results) -> Tuple[Dict[str, Any], List[str]]:
+    """Classify + measure a 2-node subckt from its ``zac``/``iv`` benches."""
+    import math
+
+    metrics: Dict[str, Any] = {}
+    caveats: List[str] = []
+    z = _twoterm_z(results.get("zac"))
+    iv = _twoterm_iv(results.get("iv"))
+    if z is None and iv is None:
+        return ({"status": "untested"},
+                ["two-terminal benches produced no usable data"])
+
+    kind: Optional[str] = None
+    if z is not None:
+        freqs, mags, phases = z
+        if min(mags) >= _TT_ROPEN:
+            return ({"status": "fail", "z_kind": "open"},
+                    ["no measurable impedance (open) -- |Z| >= 100 Mohm across "
+                     "the whole 1 Hz - 1 GHz sweep"])
+        # Midband only: the first/last decade is where the 1 G shunt and the
+        # sweep endpoints dominate. Also drop points where |Z| approaches the
+        # shunt (the measurement is of Rsh there, not of the part).
+        lo, hi = freqs[0] * 10.0, freqs[-1] / 10.0
+        band = [k for k in range(len(freqs)) if lo <= freqs[k] <= hi] or \
+            list(range(len(freqs)))
+        usable = [k for k in band if mags[k] < 0.05 * _TT_RSH]
+        if usable:
+            n = len(usable)
+            idx_ind = [k for k in usable if phases[k] > 45.0]
+            idx_cap = [k for k in usable if phases[k] < -45.0]
+            n_res = sum(1 for k in usable if abs(phases[k]) < 15.0)
+            zlo = min(mags[k] for k in usable)
+            zhi = max(mags[k] for k in usable)
+            # A real part is only ONE thing over PART of the band: a 10 mH
+            # Wurth choke reads resistive below its DCR corner (~300 Hz) and
+            # capacitive above its SRF (~600 kHz), so no single phase bucket
+            # holds a majority -- counting alone called it resistive. What
+            # separates an inductor from a capacitor is the ORDER of the
+            # reactive regions: an inductor is inductive first and capacitive
+            # above its SRF; a capacitor is the reverse. Decide on that, and
+            # keep "resistive" for a genuinely flat |Z|.
+            if len(idx_ind) + len(idx_cap) >= 0.15 * n:
+                if idx_ind and idx_cap:
+                    kind = ("inductive" if _median(idx_ind) < _median(idx_cap)
+                            else "capacitive")
+                else:
+                    kind = "inductive" if idx_ind else "capacitive"
+            elif n_res >= 0.6 * n and zhi <= 3.0 * max(zlo, 1e-18):
+                kind = "resistive"
+            else:
+                kind = "resonant"
+
+            if kind == "inductive":
+                # Estimate from the best-conditioned points (nearly pure
+                # reactance), away from the DCR corner and the SRF peak.
+                pure = [k for k in idx_ind if phases[k] > 80.0] or idx_ind
+                lh = _median([mags[k] / (2 * math.pi * freqs[k])
+                              for k in pure if freqs[k] > 0])
+                if lh:
+                    metrics["l_h"] = float(f"{lh:.4g}")
+                metrics["r_dc_ohm"] = float(f"{mags[0]:.4g}")
+                srf = _extremum_freq(freqs, mags, want_max=True)
+            elif kind == "capacitive":
+                pure = [k for k in idx_cap if phases[k] < -80.0] or idx_cap
+                cf = _median([1.0 / (2 * math.pi * freqs[k] * mags[k])
+                              for k in pure if freqs[k] > 0 and mags[k] > 0])
+                if cf:
+                    metrics["c_f"] = float(f"{cf:.4g}")
+                srf = _extremum_freq(freqs, mags, want_max=False)
+            elif kind == "resistive":
+                rm = _median([mags[k] for k in usable])
+                if rm is not None:
+                    metrics["r_ohm"] = float(f"{rm:.4g}")
+                srf = None
+            else:
+                kind = "resonant"
+                k1k = min(range(len(freqs)), key=lambda k: abs(freqs[k] - 1e3))
+                metrics["z_1khz_ohm"] = float(f"{mags[k1k]:.4g}")
+                srf = (_extremum_freq(freqs, mags, want_max=True)
+                       or _extremum_freq(freqs, mags, want_max=False))
+            if srf:
+                metrics["srf_hz"] = float(f"{srf:.4g}")
+
+    # DC I-V refines (and, for nonlinear parts, overrides) the AC verdict.
+    if iv is not None:
+        r_fit, resid = _linear_r(iv)
+        v_pos = _v_at_i(iv, 1e-3)
+        v_neg = _v_at_i(iv, -1e-3)
+        if resid is not None and resid < 0.05 and r_fit is not None:
+            # Linear -- a passive element; this is also where an inductor's DCR
+            # comes from. It must NOT promote the AC verdict to "resistive":
+            # every inductor is a wire at DC, so a linear I-V says nothing
+            # about the AC character the zac bench already measured.
+            metrics["r_dc_ohm"] = float(f"{max(r_fit, 0.0):.4g}")
+            if kind is None and r_fit > 0.05:
+                kind = "resistive"
+                metrics["r_ohm"] = float(f"{r_fit:.4g}")
+            elif kind == "resistive" and "r_ohm" not in metrics:
+                metrics["r_ohm"] = float(f"{r_fit:.4g}")
+        elif v_pos is not None and v_neg is None:
+            kind = "rectifying"
+            metrics["vf_v"] = round(v_pos, 4)
+        elif v_neg is not None and v_pos is None:
+            kind = "rectifying"
+            metrics["vf_v"] = round(abs(v_neg), 4)
+            caveats.append("conducts on the reverse sweep only -- node order is "
+                           "cathode-first")
+        elif v_pos is not None and v_neg is not None:
+            p, n_ = abs(v_pos), abs(v_neg)
+            small, large = min(p, n_), max(p, n_)
+            if small <= 1.2 and large >= 2.0:
+                kind = "zener"
+                metrics["vf_v"] = round(small, 4)
+                metrics["vz_v"] = round(large, 3)
+            else:
+                kind = "clamping"
+                metrics["vclamp_pos_v"] = round(v_pos, 3)
+                metrics["vclamp_neg_v"] = round(v_neg, 3)
+        elif kind is not None:
+            caveats.append("no conduction knee within the +/-10 V sweep")
+
+    if kind is None:
+        return ({"status": "untested"},
+                caveats + ["two-terminal benches did not converge into a "
+                           "classifiable impedance"])
+    metrics["z_kind"] = kind
+
+    # Name-encoded nominal = a real pass/fail target (like LM7805 -> 5 V).
+    nom_ok = None
+    nom = _twoterm_nominal(hit.name)
+    if nom is not None:
+        val, unit = nom
+        key = _TT_NOMINAL_KEY.get((kind, unit))
+        want = _TT_NOMINAL_UNIT_KIND.get(unit)
+        if want and want != kind:
+            # The name asserts a unit the measurement contradicts -- a finding
+            # worth surfacing, but the numbers are not comparable.
+            caveats.append(f"name asserts {val:g} {unit} ({want}) but the part "
+                           f"measures {kind} -- nominal not compared")
+        elif key is None:
+            caveats.append(f"name-encoded nominal {val:g} is an L/C value, not "
+                           f"comparable to a {kind} measurement")
+        elif isinstance(metrics.get(key), (int, float)):
+            meas = float(metrics[key])
+            metrics["nominal"] = float(f"{val:.4g}")
+            nom_ok = abs(meas - val) <= _TT_NOMINAL_TOL * abs(val)
+            if not nom_ok:
+                caveats.append(f"measured {key}={meas:.4g} vs name-nominal "
+                               f"{val:.4g} (>{_TT_NOMINAL_TOL:.0%})")
+
+    status = "pass"
+    if kind == "resonant":
+        status = "partial"
+        caveats.append("ambiguous impedance phase -- resonant/complex "
+                       "two-terminal network, not a single R/L/C")
+    elif kind in ("rectifying", "zener"):
+        vf = metrics.get("vf_v")
+        if vf is not None and not (0.1 <= vf <= 1.5):
+            status = "partial"
+            caveats.append(f"Vf={vf:.3f} V outside the plausible 0.1-1.5 V band")
+    if nom_ok is False:
+        status = "partial"
+    return {"status": status, **metrics}, caveats
+
+
+# ---- Three-terminal subckt probe cascade ----------------------------------- #
+#
+# 3-node subckts not already claimed by mosfet/ldo. A BOUNDED cascade of 15
+# benches reusing existing machinery: a 6-permutation FET trial, a
+# 6-permutation regulator trial, and 3 pairwise impedance probes. Every bench is
+# built up front (the subprocess runs them all in one child -- no early exit is
+# possible), so the set must stay small.
+
+def _threeterm_benches(hit) -> List[Dict[str, Any]]:
+    import itertools
+
+    nodes = hit.nodes or []
+    if len(nodes) != 3:
+        return []
+    inc = _model_header(hit)
+    nm = hit.name
+    out: List[Dict[str, Any]] = []
+
+    # 1. FET trial -- Id-Vgs over all 6 D/G/S assignments (source grounded).
+    for d, g, s in itertools.permutations(range(3)):
+        pos = [None, None, None]
+        pos[d], pos[g], pos[s] = "d", "g", "0"
+        name = f"tt_fet_{d}{g}{s}"
+        out.append({"name": name, "measures": ["I(Vds)"], "netlist": "\n".join(
+            [f".title {name}", inc, "Vds d 0 5", "Vgs g 0 0",
+             f"X1 {pos[0]} {pos[1]} {pos[2]} {nm}",
+             ".dc Vgs 0 10 0.1", ".end", ""])})
+
+    # 2. Regulator trial -- line sweep over all 6 IN/OUT/GND assignments.
+    for i, o, g in itertools.permutations(range(3)):
+        pos = [None, None, None]
+        pos[i], pos[o], pos[g] = "vin", "vout", "0"
+        name = f"tt_reg_p{i}{o}{g}"
+        out.append({"name": name, "measures": ["V(vout)"], "netlist": "\n".join(
+            [f".title {name}", inc, "Vin vin 0 6", "Iload vout 0 0.1",
+             f"X1 {pos[0]} {pos[1]} {pos[2]} {nm}",
+             ".dc Vin 6 20 0.25", ".end", ""])})
+
+    # 3. Pairwise impedance -- drive node i, ground node j, float the third
+    #    through a 1 G shunt (grounding it would make two of the three probes
+    #    identical).
+    for i, j in ((0, 1), (0, 2), (1, 2)):
+        k = 3 - i - j
+        pos = [None, None, None]
+        pos[i], pos[j], pos[k] = "a", "0", "flt"
+        name = f"tt_z_{i}{j}"
+        out.append({"name": name, "measures": ["V(a)"], "netlist": "\n".join(
+            [f".title {name}", inc, "I1 0 a DC 0 AC 1",
+             f"Rsh a 0 {_TT_RSH:g}", f"Rflt flt 0 {_TT_RSH:g}",
+             f"X1 {pos[0]} {pos[1]} {pos[2]} {nm}",
+             ".ac dec 10 1 1g", ".end", ""])})
+    return out
+
+
+def _tt_pair_kind(z) -> str:
+    """``inductive|capacitive|resistive|complex`` for one pairwise probe."""
+    freqs, mags, phases = z
+    lo, hi = freqs[0] * 10.0, freqs[-1] / 10.0
+    band = [k for k in range(len(freqs)) if lo <= freqs[k] <= hi] or \
+        list(range(len(freqs)))
+    usable = [k for k in band if mags[k] < 0.05 * _TT_RSH]
+    if not usable:
+        return "open"
+    n = len(usable)
+    if sum(1 for k in usable if phases[k] > 45.0) >= 0.6 * n:
+        return "inductive"
+    if sum(1 for k in usable if phases[k] < -45.0) >= 0.6 * n:
+        return "capacitive"
+    if sum(1 for k in usable if abs(phases[k]) < 15.0) >= 0.6 * n:
+        return "resistive"
+    return "complex"
+
+
+def _score_threeterm(hit, results) -> Tuple[Dict[str, Any], List[str]]:
+    """Priority cascade: transistor -> regulator -> passive network -> dead."""
+    import itertools
+
+    nodes = hit.nodes or []
+    if len(nodes) != 3:
+        return ({"status": "untestable-generic"},
+                ["three-terminal profile needs exactly 3 nodes"])
+
+    # 1. FET trial (highest confidence: the transistor signature is specific).
+    evals = []  # (score, name, (d,g,s), curve)
+    for d, g, s in itertools.permutations(range(3)):
+        cur = _id_curve(results.get(f"tt_fet_{d}{g}{s}"))
+        if cur is None:
+            continue
+        ok, score = _transistor_like(*cur)
+        if ok:
+            evals.append((score, (d, g, s), cur))
+    if evals:
+        evals.sort(key=lambda t: t[0], reverse=True)
+        score, (d, g, s), cur = evals[0]
+        cav = ["terminal identity inferred by permutation trial: "
+               f"D={nodes[d]} G={nodes[g]} S={nodes[s]}"]
+        if len(evals) > 1 and evals[1][0] > 0.5 * score:
+            cav.append("identity ambiguous -- another permutation also conducted")
+        func, cav = _finalize_fet(cur, cav)
+        cav = cav + ["z_kind=transistor means a 3-terminal CONTROLLED CONDUCTOR "
+                     "(FET / BJT / triode / SCR-like) -- the generic trial does "
+                     "not identify the device family, and vth_v/gm_s are the "
+                     "FET-bench readings, not datasheet parameters"]
+        return {**func, "z_kind": "transistor"}, cav
+
+    # 2. Regulator trial -- _score_ldo's predicate (output above 0.5 V, always
+    #    at least 0.2 V below Vin, flattest permutation wins) PLUS an absolute
+    #    flatness floor. Without it a 3-pin Schottky (1PS70SB14) scores as a
+    #    "regulator": Vout = Vin - Vf satisfies every relative test while
+    #    tracking the input 1:1. _score_ldo can rely on its name gate; this
+    #    class has none, so regulation must be proven, not inferred.
+    best = None  # (variation, (i,o,g), vin[], vout[])
+    for i, o, g in itertools.permutations(range(3)):
+        b = results.get(f"tt_reg_p{i}{o}{g}")
+        if not b or not b.get("converged"):
+            continue
+        vin = b.get("axis")
+        vout = (b.get("vectors") or {}).get("V(vout)")
+        if not vin or not vout or len(vin) != len(vout):
+            continue
+        vout = [float(x[0]) if isinstance(x, list) else float(x) for x in vout]
+        vmax, vmin = max(vout), min(vout)
+        if vmax <= 0.5:
+            continue
+        if not all(vo <= vi - 0.2 for vi, vo in zip(vin, vout)):
+            continue
+        variation = vmax - vmin
+        # A regulator holds Vout across the whole line sweep; a series drop
+        # (diode, resistor, pass FET) does not.
+        if variation > 0.1 * max(0.5 * (vmax + vmin), 1.0):
+            continue
+        if best is None or variation < best[0]:
+            best = (variation, (i, o, g), vin, vout)
+    if best is not None:
+        variation, (i, o, g), vin, vout = best
+        vout_mid = vout[len(vout) // 2]
+        line_reg = (variation / (vin[-1] - vin[0]) * 1000.0
+                    if vin[-1] != vin[0] else 0.0)
+        metrics = {"z_kind": "regulator", "vout_v": round(vout_mid, 3),
+                   "line_reg_mv_per_v": round(line_reg, 2)}
+        cav = ["terminal identity inferred by permutation trial: "
+               f"IN={nodes[i]} OUT={nodes[o]} GND={nodes[g]}"]
+        nom = _ldo_nominal_v(hit.name)
+        if nom is not None and abs(vout_mid - nom) / nom <= 0.05:
+            return {"status": "pass", **metrics}, cav
+        if nom is not None:
+            cav.append(f"Vout={vout_mid:.2f} V vs name-nominal {nom:g} V (>5%)")
+        else:
+            cav.append("nominal unknown -- measured only")
+        return {"status": "partial", **metrics}, cav
+
+    # 3. Pairwise impedance -- a passive T/pi network. PARTIAL, never pass: an
+    #    impedance measurement does not verify what the part is FOR.
+    metrics: Dict[str, Any] = {}
+    kinds = []
+    for i, j in ((0, 1), (0, 2), (1, 2)):
+        z = _twoterm_z(results.get(f"tt_z_{i}{j}"))
+        if z is None:
+            continue
+        _f, mags, _p = z
+        k1k = min(range(len(_f)), key=lambda k: abs(_f[k] - 1e3))
+        metrics[f"z{i}{j}_1khz_ohm"] = float(f"{mags[k1k]:.4g}")
+        kinds.append(f"{nodes[i]}-{nodes[j]}:{_tt_pair_kind(z)}")
+    live = [k for k in kinds if not k.endswith(":open")]
+    if len(metrics) >= 2 and live:
+        return ({"status": "partial", "z_kind": "network", **metrics},
+                ["classified as a passive network from pairwise impedance "
+                 "(" + ", ".join(kinds) + ") -- partial, not pass: a T-network "
+                 "measurement does not verify function"])
+    if metrics or kinds:
+        return ({"status": "fail", "z_kind": "open", **metrics},
+                ["no measurable behavior at any terminal pair"])
+    return ({"status": "untested"},
+            ["three-terminal benches did not converge"])
+
+
 def build_benches(hit, cls: str) -> List[Dict[str, Any]]:
     """Benches for one part: the op-point smoke bench (always first, so
     dialect/loads/op are populated) plus any class-specific functional benches.
@@ -852,6 +1392,10 @@ def build_benches(hit, cls: str) -> List[Dict[str, Any]]:
         benches.append(_jfet_bench(hit))
     elif cls == "ldo":
         benches += _ldo_benches(hit)
+    elif cls == "twoterm":
+        benches += _twoterm_benches(hit)
+    elif cls == "threeterm":
+        benches += _threeterm_benches(hit)
     return benches
 
 
@@ -1298,6 +1842,10 @@ def score_functional(hit, cls: str, results: Dict[str, Dict[str, Any]]
         return _score_jfet(hit, results)
     if cls == "ldo":
         return _score_ldo(hit, results)
+    if cls == "twoterm":
+        return _score_twoterm(hit, results)
+    if cls == "threeterm":
+        return _score_threeterm(hit, results)
     return {"status": "untested"}, []
 
 
@@ -1556,7 +2104,7 @@ def main(argv=None) -> int:
         description="Mechanized reliability sweep over the KiCad-Spice-Library.")
     ap.add_argument("--type", dest="type_", default="all",
                     choices=["opamp", "diode", "bjt", "mosfet", "jfet", "ldo",
-                             "subckt", "all"],
+                             "twoterm", "threeterm", "subckt", "all"],
                     help="eval class to sweep (default: all)")
     ap.add_argument("--only", help="restrict to parts whose name contains this")
     ap.add_argument("--limit", type=int, help="cap the number of parts")
