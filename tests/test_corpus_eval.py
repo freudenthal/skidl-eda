@@ -178,7 +178,8 @@ def _trun(one_conv, one_n, loop_loaded, loop_conv, loop_n, timed_out=False, no_b
 
 
 def test_transient_loop_collapsed_when_cascade_fails():
-    # single instance converges, stable multi-instance cascade does not -> loop-stiff
+    # single instance converges with a NORMAL step count, stable cascade does not
+    # -> genuine multi-instance collapse
     assert CE._score_transient_loop(_trun(True, 94, True, False, 0)) == "collapsed"
 
 
@@ -191,6 +192,20 @@ def test_transient_loop_slow_and_stiff_by_step_ratio():
     assert CE._score_transient_loop(_trun(True, 100, True, True, 900)) == "stiff"  # 9x
 
 
+def test_transient_loop_absolute_baseline_is_stiff_deterministically():
+    # a pathological single-instance step count is stiff regardless of the ratio,
+    # WITHOUT relying on a host-dependent timeout
+    assert CE._score_transient_loop(_trun(True, 15000, True, True, 18000)) == "stiff"
+    # ...and it takes precedence over a failing cascade (baseline dominates) --
+    # the AD745S case (14719 steps, cascade fails) is stiff, not collapsed
+    assert CE._score_transient_loop(_trun(True, 14719, True, False, 0)) == "stiff"
+
+
+def test_transient_loop_exploding_cascade_is_stiff():
+    # normal baseline, but the cascade itself explodes past the absolute cap
+    assert CE._score_transient_loop(_trun(True, 300, True, True, 12000)) == "stiff"
+
+
 def test_transient_loop_untested_without_a_baseline():
     # no converged single-instance baseline -> cannot judge (never a fault verdict)
     assert CE._score_transient_loop(_trun(False, 0, True, False, 0)) == "untested"
@@ -198,8 +213,9 @@ def test_transient_loop_untested_without_a_baseline():
     assert CE._score_transient_loop({}) == "untested"
 
 
-def test_transient_loop_timeout_is_collapsed():
-    assert CE._score_transient_loop(_trun(True, 0, True, True, 0, timed_out=True)) == "collapsed"
+def test_transient_loop_timeout_is_stiff_not_collapsed():
+    # a timeout is host-dependent -> stiff (a stiffness signal), never collapsed
+    assert CE._score_transient_loop(_trun(True, 0, True, True, 0, timed_out=True)) == "stiff"
 
 
 def test_apply_transient_loop_is_noop_for_non_opamp():

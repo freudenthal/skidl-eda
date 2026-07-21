@@ -656,6 +656,12 @@ def _opamp_benches(hit) -> List[Dict[str, Any]]:
 # thresholds sit well above that so `slow`/`stiff` never fire on a healthy part.
 _TL_SLOW_RATIO = 3.0
 _TL_STIFF_RATIO = 6.0
+# Absolute accepted-timestep count above which a single follower is already
+# pathologically stiff. Clean op-amps run ~100-320 accepted steps over this
+# window; genuine step-explosion macromodels run 15k-140k. 10k (~30-100x clean)
+# is safely above any healthy part and flags stiffness DETERMINISTICALLY, so a
+# step-explosion no longer has to depend on a host-specific wall-clock timeout.
+_TL_ABS_STIFF = 10000
 
 
 def _transient_loop_benches(hit) -> List[Dict[str, Any]]:
@@ -701,16 +707,26 @@ def _score_transient_loop(trun: Dict[str, Any]) -> str:
 
     * ``untested``  -- no single-instance baseline converged (not a driveable
       transient op-amp), or the backend produced no result. Never a fault verdict.
-    * ``collapsed`` -- the single instance converges but the stable cascade fails
-      to complete (non-convergence or a per-part timeout): the loop-stiff signature.
-    * ``stiff`` / ``slow`` -- the cascade completes but at >= STIFF / SLOW times
-      the single-instance accepted-timestep count (numerically expensive).
+    * ``stiff``     -- numerically expensive: the single instance already needs a
+      pathological number of accepted timesteps (>= ``_TL_ABS_STIFF``), OR the
+      cascade completes at >= ``_TL_STIFF_RATIO`` x the single-instance count, OR a
+      bench could not finish in the time budget (a timeout is a stiffness signal).
+    * ``slow``      -- the cascade completes at >= ``_TL_SLOW_RATIO`` x one instance.
+    * ``collapsed`` -- the single instance converges with a *normal* step count but
+      the stable cascade fails to CONVERGE: a genuine multi-instance failure.
     * ``clean``     -- the cascade completes with step economy near one instance.
+
+    Determinism note: the verdict rests on ngspice's accepted-timestep COUNT (a
+    deterministic function of the netlist), never on wall-clock. A timeout maps to
+    ``stiff`` -- NOT ``collapsed`` -- because whether a step-explosion part finishes
+    within budget is host-dependent, and both outcomes (it completed with a huge
+    count, or it timed out) mean the same thing: the model is stiff. Collapse is
+    reserved for a converged, non-pathological baseline whose cascade cannot solve.
     """
     if not trun:
         return "untested"
     if trun.get("timed_out"):
-        return "collapsed"          # the stable cascade could not finish in budget
+        return "stiff"              # a bench ran out of time budget -> numerically stiff
     benches = trun.get("benches")
     if not benches:
         return "untested"           # subprocess/backend failure, not the model
@@ -719,12 +735,17 @@ def _score_transient_loop(trun: Dict[str, Any]) -> str:
     loop = res.get("tran_loop") or {}
     if not one.get("converged"):
         return "untested"           # no baseline -> cannot judge the model's transient
+    n1 = int(one.get("n_steps") or 0)
+    if n1 >= _TL_ABS_STIFF:
+        return "stiff"              # baseline itself is pathological (deterministic)
+    n1 = max(n1, 1)
     if loop.get("loaded") and not loop.get("converged"):
-        return "collapsed"          # single OK, multi-instance fails
-    n1 = max(int(one.get("n_steps") or 0), 1)
+        return "collapsed"          # normal single baseline, but the cascade cannot solve
     nl = int(loop.get("n_steps") or 0)
     if nl <= 0:
         return "collapsed"
+    if nl >= _TL_ABS_STIFF:
+        return "stiff"              # the cascade itself exploded
     ratio = nl / n1
     if ratio >= _TL_STIFF_RATIO:
         return "stiff"
@@ -2050,12 +2071,12 @@ def apply_transient_loop(rec: Dict[str, Any], hit, cls: str, compat: str = "psa"
     rec["tiers"]["transient_loop"] = verdict
     if verdict == "collapsed":
         rec.setdefault("caveats", []).append(
-            "loop-stiff: converges as one instance but a stable multi-instance "
-            "cascade fails to complete on ngspice")
+            "loop-collapse: converges as one instance (normal step count) but a "
+            "stable multi-instance cascade cannot solve on ngspice")
     elif verdict in ("stiff", "slow"):
         rec.setdefault("caveats", []).append(
-            "loop-expensive: multi-instance cascade converges but at an elevated "
-            "accepted-timestep count")
+            "loop-expensive: numerically stiff transient (pathological "
+            "accepted-timestep count in the single instance or the cascade)")
     return rec
 
 
@@ -2243,6 +2264,10 @@ def main(argv=None) -> int:
                     help="skip parts already recorded at this harness_version")
     ap.add_argument("--rerun-failures", action="store_true",
                     help="re-run parts whose existing record failed to load/errored")
+    ap.add_argument("--rerun-transient-loop", dest="rerun_tl", metavar="VERDICT",
+                    help="re-run ONLY parts whose existing record has this "
+                         "transient_loop verdict (e.g. collapsed) -- a targeted "
+                         "top-up that skips the rest of the class")
     ap.add_argument("--compat", default="psa", help="ngspice ngbehavior (default psa)")
     ap.add_argument("--path", help="explicit corpus path (repo root or Models dir)")
     ap.add_argument("--date", help="override the record date (YYYY-MM-DD; for tests)")
@@ -2284,6 +2309,12 @@ def main(argv=None) -> int:
     for hit in parts:
         cls = args.type_ if args.type_ != "all" else classify_eval_class(hit)
         prev = existing.get(hit.name)
+        # Targeted top-up: re-run ONLY parts currently at a given transient_loop
+        # verdict (overrides the normal resume/skip logic).
+        if getattr(args, "rerun_tl", None):
+            if prev and prev.get("tiers", {}).get("transient_loop") == args.rerun_tl:
+                pending.append((hit, cls))
+            continue
         # Skip only when the stored record matches BOTH the file on disk and the
         # current harness logic (an invalidated/blank harness_hash forces a rerun).
         if (args.resume and is_record_current(prev, hit.path, cls)

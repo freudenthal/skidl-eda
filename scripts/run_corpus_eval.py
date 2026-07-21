@@ -195,6 +195,10 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--compat", default="psa", help="ngspice ngbehavior (default psa)")
     ap.add_argument("--resume", action="store_true",
                     help="skip parts already recorded at this harness_version")
+    ap.add_argument("--rerun-transient-loop", dest="rerun_tl", metavar="VERDICT",
+                    help="re-run ONLY parts whose existing record has this "
+                         "transient_loop verdict (e.g. collapsed) -- a targeted "
+                         "top-up that skips the rest of the class")
     ap.add_argument("--rerun-failures", action="store_true",
                     help="re-run parts whose existing record failed to load/errored")
     ap.add_argument("--out", help="results JSONL (default <memory_dir>/corpus_eval_results.jsonl)")
@@ -249,6 +253,15 @@ def main(argv=None) -> int:
     for hit in parts:
         cls = args.type_ if args.type_ != "all" else CE.classify_eval_class(hit)
         prev = existing.get(hit.name)
+        # Targeted top-up: re-run ONLY parts currently at a given transient_loop
+        # verdict (e.g. re-score the `collapsed` op-amps after a scorer fix without
+        # redoing the whole class). Overrides the normal resume/skip logic.
+        if args.rerun_tl:
+            if not prev or (prev.get("tiers", {}).get("transient_loop") != args.rerun_tl):
+                continue
+            pending.append((hit, cls))
+            per_class[cls] += 1
+            continue
         # Skip only when the stored record still matches BOTH the file bytes on
         # disk and the current harness logic; a blanked harness_hash (see
         # scripts/update_corpus_hashes.py) forces a rerun.
@@ -312,8 +325,13 @@ def main(argv=None) -> int:
               f"{tri}  {fcol} {metric}{tail}")
 
     def ev(hc):
-        return CE.evaluate_part(hc[0], hc[1], models_dir, compat=args.compat,
-                                timeout_s=args.timeout, date=args.date)
+        rec = CE.evaluate_part(hc[0], hc[1], models_dir, compat=args.compat,
+                               timeout_s=args.timeout, date=args.date)
+        # Stage-7 transient_loop tier (op-amp only; no-op otherwise). Must be
+        # applied here too -- this runner reimplements the sweep loop and would
+        # otherwise leave transient_loop unpopulated.
+        return CE.apply_transient_loop(rec, hc[0], hc[1], compat=args.compat,
+                                       timeout_s=args.timeout)
 
     done = 0
     interrupted = False
