@@ -164,6 +164,56 @@ def test_build_benches_has_smoke():
     assert ".op" in b[0]["netlist"]
 
 
+# ---- Stage 7: transient-loop stiffness scorer (pure, no ngspice) -----------
+
+def _trun(one_conv, one_n, loop_loaded, loop_conv, loop_n, timed_out=False, no_benches=False):
+    if timed_out:
+        return {"timed_out": True, "benches": []}
+    if no_benches:
+        return {"benches": []}
+    return {"benches": [
+        {"name": "tran_one", "loaded": True, "converged": one_conv, "n_steps": one_n},
+        {"name": "tran_loop", "loaded": loop_loaded, "converged": loop_conv, "n_steps": loop_n},
+    ]}
+
+
+def test_transient_loop_collapsed_when_cascade_fails():
+    # single instance converges, stable multi-instance cascade does not -> loop-stiff
+    assert CE._score_transient_loop(_trun(True, 94, True, False, 0)) == "collapsed"
+
+
+def test_transient_loop_clean_when_step_economy_near_one_instance():
+    assert CE._score_transient_loop(_trun(True, 124, True, True, 158)) == "clean"
+
+
+def test_transient_loop_slow_and_stiff_by_step_ratio():
+    assert CE._score_transient_loop(_trun(True, 100, True, True, 400)) == "slow"   # 4x
+    assert CE._score_transient_loop(_trun(True, 100, True, True, 900)) == "stiff"  # 9x
+
+
+def test_transient_loop_untested_without_a_baseline():
+    # no converged single-instance baseline -> cannot judge (never a fault verdict)
+    assert CE._score_transient_loop(_trun(False, 0, True, False, 0)) == "untested"
+    assert CE._score_transient_loop(_trun(True, 0, True, True, 0, no_benches=True)) == "untested"
+    assert CE._score_transient_loop({}) == "untested"
+
+
+def test_transient_loop_timeout_is_collapsed():
+    assert CE._score_transient_loop(_trun(True, 0, True, True, 0, timed_out=True)) == "collapsed"
+
+
+def test_apply_transient_loop_is_noop_for_non_opamp():
+    rec = {"tiers": {"op_converges": True, "transient_loop": "untested"}, "error": ""}
+    out = CE.apply_transient_loop(rec, _hit("D1"), "diode")
+    assert out["tiers"]["transient_loop"] == "untested"  # untouched, no ngspice call
+
+
+def test_apply_transient_loop_skips_non_loading_opamp():
+    rec = {"tiers": {"op_converges": False, "transient_loop": "untested"}, "error": ""}
+    out = CE.apply_transient_loop(rec, _hit("U1"), "opamp")
+    assert out["tiers"]["transient_loop"] == "untested"  # no baseline -> skipped, no ngspice call
+
+
 # ---- store I/O -------------------------------------------------------------
 
 def test_write_records_sorted_and_roundtrip(tmp_path):
@@ -196,7 +246,7 @@ def test_render_report_structure():
          "caveats": ["dialect not simulatable: XSPICE digital"], "error": ""},
     ]
     md = CE.render_report(recs, wall_s=12.0)
-    assert "Transient-loop robustness is NOT covered" in md  # the mandatory hedge
+    assert "SINGLE-INSTANCE test" in md  # the mandatory transient-loop hedge
     assert "transient_loop: untested" in md
     assert "## diode (1)" in md
     assert "## opamp (1)" in md

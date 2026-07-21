@@ -18,9 +18,12 @@ Design decisions (locked in the plan):
     The skidl seam stays covered by ``canaries/spice_library/drive_spike.py``.
   * **The score is TIERED, never a single grade:** ``dialect`` -> ``loads`` ->
     ``op_converges`` -> ``functional`` (per-class metrics vs formula) ->
-    ``transient_loop`` (Stage 7; until then always ``"untested"``). A part that
-    passes ``functional`` may still be loop-stiff (LMC6482) -- every record says
-    ``transient_loop: "untested"`` and the report header carries the hedge.
+    ``transient_loop`` (Stage 7). A part can pass ``functional`` and still be
+    loop-stiff, so the last tier drives a stable multi-instance transient cascade
+    (:func:`_transient_loop_benches`) and reports ``clean``/``slow``/``stiff``/
+    ``collapsed``/``untested`` (:func:`apply_transient_loop`). It is populated for
+    the **op-amp** class today; other classes keep ``"untested"`` until they grow
+    a transient profile, and the report header carries that hedge.
   * **Never invent a verdict** -- records are written only from actual runs.
 
 Bench/profile architecture: a *profile* (per eval-class) turns a resolved
@@ -237,7 +240,7 @@ def _run_benches_inproc(benches: List[Dict[str, Any]], compat: str = "psa") -> D
     out = []
     for b in benches:
         r = {"name": b.get("name", "?"), "loaded": False, "converged": False,
-             "error": "", "vectors": {}, "axis": None}
+             "error": "", "vectors": {}, "axis": None, "n_steps": 0}
         try:
             shared.exec_command("reset")
         except Exception:
@@ -268,6 +271,14 @@ def _run_benches_inproc(benches: List[Dict[str, Any]], compat: str = "psa") -> D
                     r["axis"] = [float(np.real(x)) for x in aw]  # AC freq is complex
                 except Exception:  # noqa: BLE001
                     pass
+            # n_steps = number of accepted timepoints in the plot. For a .tran
+            # this is a direct numerical-stiffness meter: a stiff model forces
+            # ngspice's adaptive controller to tiny dt (many more accepted steps)
+            # for the same end_time. Used by the transient-loop stiffness probe.
+            try:
+                r["n_steps"] = int(len(plot[axk if axk is not None else keys[0]]))
+            except Exception:  # noqa: BLE001
+                r["n_steps"] = len(r["axis"]) if r["axis"] else 0
         except Exception as e:  # noqa: BLE001
             msg = f"{type(e).__name__}: {str(e)[:160]}"
             if not r["loaded"]:
@@ -519,7 +530,8 @@ _SHARED_FNS = ["_smoke_bench", "_model_header", "extract_minimal_deck",
                "_parse_definitions", "evaluate_part", "_dialect_of"]
 _CLASS_FNS = {
     "opamp": ["_opamp_benches", "_score_opamp", "_gbw_from_ac", "_scalar",
-              "_status_from"],
+              "_status_from", "_transient_loop_benches", "_score_transient_loop",
+              "apply_transient_loop"],
     "diode": ["_diode_benches", "_score_diode", "_v_at_current",
               "_model_card_bv", "_scalar"],
     "bjt": ["_bjt_bench", "_score_bjt"],
@@ -636,6 +648,89 @@ def _opamp_benches(hit) -> List[Dict[str, Any]]:
         {"name": "openloop", "netlist": openloop, "measures": ["V(nout)"]},
         {"name": "ac", "netlist": acgbw, "measures": ["V(nout)"]},
     ]
+
+
+# ---- Stage 7: multi-instance transient-loop stiffness probe ----------------- #
+
+# clean op-amps run the cascade in ~1.2-1.7x the single-instance step count;
+# thresholds sit well above that so `slow`/`stiff` never fire on a healthy part.
+_TL_SLOW_RATIO = 3.0
+_TL_STIFF_RATIO = 6.0
+
+
+def _transient_loop_benches(hit) -> List[Dict[str, Any]]:
+    """The Stage-7 probe: a single-instance step-follower baseline + a 3x cascade
+    of unity followers, both step-excited.
+
+    The cascade is analytically STABLE (a chain of unity buffers), so a timestep
+    collapse in it is unambiguously the model's numerical fault, not the
+    circuit's -- the design principle that separates a stiffness probe from a
+    convergence quirk. A macromodel that survives one instance but collapses the
+    cascade is the *loop-stiff* signature the LMC6482 lesson names (measured live:
+    LMC6061_NS collapses the cascade while its single instance converges; TL072
+    and this corpus's LMC6482 stay clean).
+
+    ``n_steps`` (accepted timepoints) is the meter: a stiff model forces ngspice's
+    adaptive controller to tiny dt. ``tmax`` is left loose (800 ns over a 40 us
+    run) so ngspice's own LTE control -- not an output-step cap -- sets dt. The
+    verdict rests on the loop/one step-count RATIO + completion, both deterministic
+    for a fixed netlist, so records stay byte-reproducible.
+    """
+    inc = _model_header(hit)
+    nm = hit.name
+    rails = ["Vp vp 0 15", "Vn vn 0 -15"]
+    stim = "Vin nin 0 PULSE(0 2 1u 5n 5n 1 2)"   # one gentle 2 V step; input does not force small dt
+    ana = ".tran 40n 40u 0 800n"
+    one = "\n".join([".title tran_one", inc, *rails, stim,
+                     f"X1 nin nout vp vn nout {nm}", "Rl nout 0 1meg", "Cl nout 0 47p",
+                     ana, ".end", ""])
+    loop = "\n".join([".title tran_loop", inc, *rails, stim,
+                      f"X1 nin n1 vp vn n1 {nm}", "R1 n1 0 1meg", "C1 n1 0 47p",
+                      f"X2 n1 n2 vp vn n2 {nm}", "R2 n2 0 1meg", "C2 n2 0 47p",
+                      f"X3 n2 nout vp vn nout {nm}", "Rl nout 0 1meg", "Cl nout 0 47p",
+                      ana, ".end", ""])
+    return [
+        {"name": "tran_one", "netlist": one, "measures": ["V(nout)"]},
+        {"name": "tran_loop", "netlist": loop, "measures": ["V(nout)"]},
+    ]
+
+
+def _score_transient_loop(trun: Dict[str, Any]) -> str:
+    """Verdict from the probe run: ``clean`` | ``slow`` | ``stiff`` |
+    ``collapsed`` | ``untested``.
+
+    * ``untested``  -- no single-instance baseline converged (not a driveable
+      transient op-amp), or the backend produced no result. Never a fault verdict.
+    * ``collapsed`` -- the single instance converges but the stable cascade fails
+      to complete (non-convergence or a per-part timeout): the loop-stiff signature.
+    * ``stiff`` / ``slow`` -- the cascade completes but at >= STIFF / SLOW times
+      the single-instance accepted-timestep count (numerically expensive).
+    * ``clean``     -- the cascade completes with step economy near one instance.
+    """
+    if not trun:
+        return "untested"
+    if trun.get("timed_out"):
+        return "collapsed"          # the stable cascade could not finish in budget
+    benches = trun.get("benches")
+    if not benches:
+        return "untested"           # subprocess/backend failure, not the model
+    res = {b["name"]: b for b in benches}
+    one = res.get("tran_one") or {}
+    loop = res.get("tran_loop") or {}
+    if not one.get("converged"):
+        return "untested"           # no baseline -> cannot judge the model's transient
+    if loop.get("loaded") and not loop.get("converged"):
+        return "collapsed"          # single OK, multi-instance fails
+    n1 = max(int(one.get("n_steps") or 0), 1)
+    nl = int(loop.get("n_steps") or 0)
+    if nl <= 0:
+        return "collapsed"
+    ratio = nl / n1
+    if ratio >= _TL_STIFF_RATIO:
+        return "stiff"
+    if ratio >= _TL_SLOW_RATIO:
+        return "slow"
+    return "clean"
 
 
 # ---- diode benches (.model D) ---------------------------------------------- #
@@ -1933,6 +2028,37 @@ def evaluate_part(hit, cls: str, models_dir: Optional[str], compat: str = "psa",
     return rec
 
 
+# The Stage-7 ``transient_loop`` tier is populated by ``apply_transient_loop`` from
+# the sweep driver, deliberately NOT inside ``evaluate_part``: that function is in
+# ``_SHARED_FNS``, so editing it would re-hash EVERY class and force a full-corpus
+# re-sweep. Keeping the probe in a separate function whose name lives only in
+# ``_CLASS_FNS["opamp"]`` moves just the op-amp harness_hash -- surgical invalidation.
+def apply_transient_loop(rec: Dict[str, Any], hit, cls: str, compat: str = "psa",
+                         timeout_s: float = 10.0) -> Dict[str, Any]:
+    """Populate ``rec['tiers']['transient_loop']`` for op-amps via the Stage-7
+    probe (a no-op for other classes / non-loading parts). Runs in its OWN bounded
+    subprocess so a cascade collapse or hang cannot cost the functional result.
+
+    Called by the sweep driver after :func:`evaluate_part` so that adding this
+    tier bumps only the op-amp harness_hash (see the comment above this function).
+    """
+    if cls != "opamp" or rec.get("error") or not rec.get("tiers", {}).get("op_converges"):
+        return rec
+    trun = run_benches_bounded(_transient_loop_benches(hit), compat=compat,
+                               timeout_s=min(timeout_s, 12.0))
+    verdict = _score_transient_loop(trun)
+    rec["tiers"]["transient_loop"] = verdict
+    if verdict == "collapsed":
+        rec.setdefault("caveats", []).append(
+            "loop-stiff: converges as one instance but a stable multi-instance "
+            "cascade fails to complete on ngspice")
+    elif verdict in ("stiff", "slow"):
+        rec.setdefault("caveats", []).append(
+            "loop-expensive: multi-instance cascade converges but at an elevated "
+            "accepted-timestep count")
+    return rec
+
+
 # --------------------------------------------------------------------------- #
 # Store I/O (resume-aware, deterministic write)                               #
 # --------------------------------------------------------------------------- #
@@ -1972,10 +2098,11 @@ def _is_failure(rec: Dict[str, Any]) -> bool:
 # --------------------------------------------------------------------------- #
 
 _REPORT_HEDGE = (
-    "> **Hedge:** a `functional` PASS is a SINGLE-INSTANCE test. Transient-loop "
-    "robustness is NOT covered here (a part can pass every single-instance test "
-    "and still collapse in a multi-instance feedback loop -- see LMC6482). Every "
-    "record carries `transient_loop: untested`."
+    "> **Hedge:** a `functional` PASS is a SINGLE-INSTANCE test. The Stage-7 "
+    "`transient_loop` tier covers multi-instance stiffness for **op-amps** "
+    "(`clean`/`slow`/`stiff`/`collapsed`); all other classes still carry "
+    "`transient_loop: untested` until they grow a transient profile, so their "
+    "records do NOT yet speak to loop-stiff collapse (the LMC6482 lesson)."
 )
 
 
@@ -2184,8 +2311,15 @@ def main(argv=None) -> int:
               file=sys.stderr)
 
     done = 0
-    ev = lambda hc: evaluate_part(hc[0], hc[1], models_dir, compat=args.compat,
-                                  timeout_s=args.timeout, date=args.date)
+
+    def ev(hc):
+        hit, cls = hc
+        rec = evaluate_part(hit, cls, models_dir, compat=args.compat,
+                            timeout_s=args.timeout, date=args.date)
+        # Stage 7: populate transient_loop here (not in evaluate_part) so the tier
+        # bumps only the op-amp harness_hash -- surgical invalidation.
+        return apply_transient_loop(rec, hit, cls, compat=args.compat,
+                                    timeout_s=args.timeout)
     if args.workers and args.workers > 1:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 

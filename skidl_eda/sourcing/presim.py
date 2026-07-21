@@ -11,10 +11,12 @@ caveated, **before** a transient run discovers it the expensive way.
 Design rules (inherited, non-negotiable):
 
 * **Advisory, never blocking.** ``ok`` is always ``True``. The store can never
-  prove a model is *good* -- ``transient_loop`` is ``untested`` on every record,
-  and a part can pass every single-instance test and still collapse in a
-  multi-instance feedback loop (the LMC6482 lesson). It can only report that
-  something was measured *bad*, which is worth saying out loud.
+  prove a model is *good*. The Stage-7 ``transient_loop`` tier now catches
+  multi-instance loop-stiff collapse for **op-amps** (``collapsed``/``stiff``),
+  but it is ``untested`` for every other class, and even a ``clean`` op-amp is
+  only clean for the probe's stable cascade -- a part can still collapse in a
+  different loop (the LMC6482 lesson). It can only report that something was
+  measured *bad*, which is worth saying out loud.
 * **Never invent a verdict.** A part with no record produces no finding. Silence
   here means "unmeasured", not "fine" -- ``summary()`` says so explicitly.
 * **Curated beats measured** for the human-facing reason, matching the reader.
