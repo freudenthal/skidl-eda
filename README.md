@@ -424,6 +424,22 @@ python canaries/sipm_tia/drive_validation.py  # equivalence | sim | gates | layo
 python canaries/hitl_pcb/drive_hitl_pcb.py    # generate | edit | regenerate | PCB
 ```
 
+Each canary is a slimmed builder (`*_skidl.py`) distilled from an end-to-end
+design in `../kicadprojects/`, plus a `drive_*.py` acceptance script and a
+gated `tests/test_*_canary.py` (fast build assertions + a live-ngspice check
+that skips when the backend is absent). The set covers a spread of hard
+mechanisms:
+
+```bash
+python canaries/royer_zvs/drive_royer.py      # self-oscillating ZVS, 24 V -> ~2 kV HV AC
+python canaries/llc_resonant/drive_llc.py     # half-bridge LLC resonant converter (48 -> 12 V)
+python canaries/dff_divider/drive_dff.py      # behavioral D-flip-flop /2 divider (no XSPICE)
+python canaries/trig_pulser/drive_trig_pulser.py  # TRIGSW behavioral avalanche pulser
+python canaries/hv_postreg/drive_hv_postreg.py    # closed-loop precision HV linear post-reg (12..200 V)
+python canaries/hvllc/drive_hvllc.py          # HV LLC step-up w/ real IR2104 driver + LT1364 monitor
+python canaries/funcgen/drive_funcgen.py      # relaxation-VCO square+sine generator (10-120 kHz)
+```
+
 ## License
 
 MIT.
