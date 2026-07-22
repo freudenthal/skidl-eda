@@ -66,3 +66,7 @@ def test_invbuckboost_matches_device_twin():
 
 def test_sepic_matches_device_twin():
     _run_xcheck("sepic", "drive_sepic_xcheck")
+
+
+def test_cuk_matches_device_twin():
+    _run_xcheck("cuk", "drive_cuk_xcheck")
