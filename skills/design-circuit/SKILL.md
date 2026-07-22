@@ -489,6 +489,44 @@ entry point and the `Sim_*` attribute spelling differ.
   gain peaks at the parallel resonance `fp = 1/(2π√((Lr+Lm)Cr))` and crosses unity
   (`M≈1 → Vout ≈ n·Vin/2 − Vf`) at `fr = 1/(2π√(Lr·Cr))`, monotonically
   decreasing above `fr` (buck region). See `canaries/llc_resonant/`.
+- **Bidirectional multi-switch converters (buck-boost / SEPIC).** Three
+  synchronous switch-stage macromodels replace **only the switches** — your
+  inductor(s), coupling cap and output cap stay real parts. All are **open-loop:
+  the duty is the control variable you set and sweep** (like BUCK/HALFBRIDGE, no
+  VOUT feedback loop), with built-in antiparallel body diodes so the switches
+  conduct both ways. `Sim_Params` takes `fsw` (required) + duty; `dt` (deadtime,
+  default 100 n) and `ron` default as HALFBRIDGE. Each accepts a first-order
+  `vout=…`+`vin=…` **convenience** that derives the duty (see the caveat under
+  Honest limits — it is an ideal-lossless estimate, so the real rail lands a few %
+  low; sweep duty for the truth). Put the `Sim_Device` on a switcher-shaped symbol
+  whose pin **names** carry the terminals the multi-node resolver keys on:
+  * `Sim_Device="BUCKBOOST4"` — non-inverting **4-switch** buck-boost. Pins
+    `VIN`/`SW`/`SW2`/`VOUT`/`GND`; your real inductor sits **between `SW` and
+    `SW2`**. `Sim_Params="fsw=500k dbuck=0.5 dboost=0"` — the buck leg (VIN/SW) runs
+    at `DBUCK`, the boost leg (VOUT/SW2) at `1−DBOOST`; each unspecified leg
+    defaults to pass-through (DBUCK 1, DBOOST 0), so `dbuck=0.5` alone is a plain
+    synchronous buck. A leg driven to a saturated endpoint (a pure buck/boost) is a
+    static `RON` tie, not a dead switch. Ideal gain `Vout/Vin = DBUCK/(1−DBOOST)`.
+    Seed `{VOUT:0, SW:0, SW2:0}`. See `canaries/buckboost4/`.
+  * `Sim_Device="INVBUCKBOOST"` — inverting **2-switch** buck-boost, **negative
+    output**. Pins `VIN`/`SW`/`VOUT`/`GND`; your inductor sits `SW→GND`.
+    `Sim_Params="fsw=500k d=0.5 dt=25n"`. Ideal gain `Vout = −Vin·D/(1−D)`
+    (negative). **Negative-rail convergence:** `stiff=True` + UIC + seed
+    `{VOUT:0, SW:0}` (the F4 floating-node tie needs no special handling — the
+    load-tied output isn't DC-floating). Use `dt≈25 n`: the single switch *and*
+    rectifier each carry input+output current, so a larger deadtime pulls the
+    high-gain point out of band. See `canaries/invbuckboost/`.
+  * `Sim_Device="SEPIC"` — non-inverting **2-switch** SEPIC (SEPIC forward / Zeta
+    reverse), with a **coupling cap**. Pins `VIN`/`SW`/`SW2`/`VOUT`/`GND`, where
+    `SW`=node A (main switch) and `SW2`=node B (rectifier); your **two inductors,
+    the coupling cap Cs (A→B) and Cout stay real** — the macromodel does not emit
+    Cs (A and B on the same net is a hard error). Ideal gain `Vout = Vin·D/(1−D)`,
+    stepping up or down through the `D=0.5≈Vin` crossover. **SEPIC convergence:**
+    `stiff=True` + UIC + seed `{VOUT:0}`, and run **longer** (`end≈600·per`) so Cs
+    self-biases to ≈Vin — the load-bearing SEPIC invariant `V(A)−V(B)≈Vin`; use
+    `dt≈25 n`. See `canaries/sepic/`.
+  Direction of power flow is set purely by **where you attach source vs. load**
+  (swap them for reverse/boost-up or Zeta), not by any mode-select logic.
 - **Multi-winding transformers.** `Transformer_1P_1S` (AA/AB, SA/SB),
   `Transformer_1P_2S` (adds an independent SC/SD secondary), and the
   center-tapped `Transformer_1P_SS` (SA/SC/SB, SC = tap) all simulate as coupled
@@ -624,9 +662,19 @@ entry point and the `Sim_*` attribute spelling differ.
   blocking the loop; expect it and budget for it.
 - **Honest remaining limits (say so rather than approximating):**
   forward-converter and other single-ended isolated topologies are **not**
-  simulatable yet (no forward-reset model). The half-bridge/LLC model is
-  **open-loop only** — no burst-mode / frequency-control feedback loop — and the
-  macromodel underestimates switching losses (ideal switches).
+  simulatable yet (no forward-reset model). The half-bridge/LLC and the
+  bidirectional buck-boost/SEPIC models are **open-loop only** — duty (and, for
+  multi-leg parts, phase) is the control variable, with no error amp, compensator,
+  burst-mode / frequency-control feedback loop, or current-limit / thermal
+  foldback. They are **ideal-switch** models, so switching losses are
+  underestimated and a real rail lands a few % below the ideal-gain line (the
+  `vout=…` convenience is that ideal-lossless estimate — sweep duty to see the
+  true rail). "**Bidirectional**" means only that the synchronous switches conduct
+  both ways: the direction of power flow is set by **source/load placement**, there
+  is **no automatic forward↔reverse or buck↔boost mode handoff**. Real
+  controller-IC vendor subckts (LTC3780 / LT8390 / LM5175-class) are ≥4-node parts
+  → they stay `untestable-generic` (the IR2104 lesson); we simulate the **power
+  stage**, not the controller.
 - **Simulation-only model controls (`Sim_*`, as `Part` kwargs):**
   `Sim_Enable="0"` excludes a part from simulation (symbol/footprint stay — use
   it for connectors/test points); `Sim_Params="bf=250 vaf=80"` overrides model
