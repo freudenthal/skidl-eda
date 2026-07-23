@@ -64,8 +64,11 @@ def test_cmcontroller_emits_closed_loop_pwm_engine():
     with ckt:
         conv = SpiceConverter(skidl_flat_view())
         net = str(conv.convert(strict=True))
-    # gm error amp into the real VC net (soft reference ramps it via `time`)
-    assert "BU1_ea 0 VC I = 0.00025*(V(U1_vref) - V(FB))" in net, net
+    # gm error amp into the real VC net (soft reference ramps it via `time`), now
+    # source/sink-limited with soft VHIGH/VLOW output-swing clamps (Stage 29.2)
+    assert ("BU1_ea 0 VC I = min(max(0.00025*(V(U1_vref) - V(FB)), -0.001), 0.001)"
+            in net), net
+    assert "DU1_hi VC U1_vh DCLU1" in net and "DU1_lo U1_vl VC DCLU1" in net, net
     # current sense (0V in the switch branch) + slope-comp signal
     assert "VU1_isns U1_swhi SW 0" in net, net
     assert "BU1_isig U1_isig 0 V = 0.1*I(VU1_isns) + 0.1*V(U1_ramp)" in net, net

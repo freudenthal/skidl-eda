@@ -3,7 +3,7 @@
 
 Runs the behavioral CLOSED-LOOP peak-current-mode buck on live ngspice and proves
 the new large-signal regime, then cross-checks it against Stage 28.D's averaged
-small-signal model on the SAME power stage. Exit 0 = T1-T3 met, 1 = a criterion
+small-signal model on the SAME power stage. Exit 0 = T1-T5 met, 1 = a criterion
 failed, 2 = backend unavailable.
 
   T1  REGULATION: the closed-loop ``.tran`` (stiff + UIC, seed VOUT=0) starts from
@@ -25,6 +25,12 @@ failed, 2 = backend unavailable.
       variation < 5 %), no period-doubling. Peak current mode above D=0.5 needs slope
       comp or it alternates wide/narrow pulses (Basso Fig. 5c/d); this proves the
       default ``mcslope`` damps it.
+  T5  DUAL REFERENCE (Stage 29.2): the same buck regulated by a NEGATIVE VREF (-0.8 V)
+      with the feedback level-shifted to a -1 V rail so the divider tap sits at the
+      negative reference. VOUT settles to +3.3 V and V(FB) to -0.8 V (< 0) -- proving
+      the error amp regulates FB to a negative reference (the LT3757 dual-reference
+      path), not just a positive one. The true negative-OUTPUT inverting-FBX converter
+      needs an inverting power stage (Stage 29.4); here the buck output stays positive.
 
 A startup ``.tran`` plot (VOUT, VC, gate) and the averaged loop-gain Bode are saved
 to ``sim_plots/``.
@@ -256,6 +262,29 @@ def main() -> int:
         print(f"RESULT T4 slope-comp @ D>0.5: VOUT={vhd:.3f}V duty={duty_hd:.3f} "
               f"on-width CV={cv:.3f} (<0.05 = subharmonically stable) "
               f"{'PASS' if t4 else 'FAIL'}")
+
+        # --- T5 dual reference: NEGATIVE VREF regulates with FB < 0 (Stage 29.2) --
+        # The same positive buck, feedback level-shifted to a -1 V rail so the divider
+        # tap sits at the negative reference; proves the error amp regulates FB to a
+        # negative VREF (the LT3757 dual-reference path), not just a positive one. The
+        # true negative-OUTPUT inverting-FBX converter is Stage 29.4.
+        inv = _tran(B.cmc_buck_invfb(), end_time=600e-6)
+        ti = np.asarray(inv.analysis.time, dtype=float)
+        voi = np.asarray(inv.analysis["VOUT"], dtype=float)
+        fbi = np.asarray(inv.analysis["FB"], dtype=float)
+        mi = ti > (ti[-1] - 100e-6)
+        vo_inv = float(voi[mi].mean())
+        fb_inv = float(fbi[mi].mean())
+        vo_err = (vo_inv - B.VOUT_INVFB) / B.VOUT_INVFB
+        t5 = (
+            np.isfinite(voi).all()
+            and abs(vo_err) <= 0.03
+            and fb_inv < 0                                   # feedback tap is negative
+            and abs(fb_inv - B.FB_INVFB) <= 0.05             # regulates to the -0.8 ref
+        )
+        print(f"RESULT T5 dual-ref (VREF<0): VOUT={vo_inv:.3f}V ({vo_err * 100:+.1f}%) "
+              f"FB={fb_inv:+.3f}V (target {B.FB_INVFB:+.3f}, <0) "
+              f"{'PASS' if t5 else 'FAIL'}")
     except Exception as e:  # noqa: BLE001
         import traceback
 
@@ -263,7 +292,7 @@ def main() -> int:
         print(f"RESULT cmc-buck BACKEND-UNAVAILABLE: {type(e).__name__}: {str(e)[:120]}")
         return 2
 
-    ok = t1 and t2 and t3 and t4
+    ok = t1 and t2 and t3 and t4 and t5
     print(f"RESULT cmc-buck ALL {'PASS' if ok else 'FAIL'} "
           f"(closed-loop behavioral emulation; NOT the encrypted current-mode IC)")
     return 0 if ok else 1

@@ -177,6 +177,65 @@ def cmc_buck_highduty(mcslope: float = MCSLOPE, tss: float = SS_T):
     return ckt
 
 
+def cmc_buck_invfb(tss: float = SS_T):
+    """Closed-loop buck regulated by a **NEGATIVE reference** with FB < 0 (Stage 29.2).
+
+    Proves the LT3757-style dual reference: the error amp regulates V(FB) to a
+    *negative* VREF (here -0.8 V), not just a positive one. The power stage is the
+    same positive-output buck (VOUT ~= +3.3 V @ ~1 A); the feedback is **level-shifted**
+    to a -1 V bias rail so the divider tap sits at a negative voltage:
+
+        VOUT(+3.3) --Rtop 205k-- FB --Rbot 10k-- VNEG(-1 V)
+        FB = (VOUT*Rbot + VNEG*Rtop)/(Rtop+Rbot) = (3.3*10 - 1*205)/215 = -0.8 V
+
+    Negative feedback still holds (VOUT up -> FB up -> (VREF-FB) down -> VC down ->
+    switch off earlier). This is the honest, *buck-realizable* demonstration of the
+    negative-reference path: a genuine closed loop that regulates a real rail with
+    FB < 0. The true negative-*output* inverting-FBX converter (where VOUT itself is
+    negative) needs an inverting power stage and is Stage 29.4 -- here the buck output
+    stays positive and only the reference/feedback polarity is exercised.
+    """
+    from skidl import Circuit, Net, Part
+
+    ckt = Circuit(name="cmc_buck_invfb")
+    with ckt:
+        u = _cmc_part(
+            Sim_Device="CMCONTROLLER",
+            Sim_Params=(
+                f"topology=buck fsw={FSW / 1e3:g}k vout={VOUT_NOM:g} vin={VIN} "
+                f"vref=-0.8 ri={RI:g} gm={GM:g} mcslope={MCSLOPE:g} tss={tss:g}"
+            ),
+            Note="negative-reference closed loop (FB<0) -- dual-reference proof",
+        )
+        v1 = Part("Simulation_SPICE", "VDC", ref="V1", value=VIN, Note="input bus")
+        vn = Part("Simulation_SPICE", "VDC", ref="VN", value="-1",
+                  Note="-1 V bias rail level-shifts the FB divider")
+        l1 = Part("Device", "L", ref="L1", value=L)
+        co = Part("Device", "C", ref="C1", value=COUT)
+        rl = Part("Device", "R", ref="RL", value=RLOAD)
+        rt = Part("Device", "R", ref="RT", value="205k")
+        rb = Part("Device", "R", ref="RB", value="10k")
+        rc = Part("Device", "R", ref="RC", value=RC)
+        cc = Part("Device", "C", ref="CC", value=CC)
+
+        vin, sw, vout, vc, ncc = (Net(n) for n in ("VIN", "SW", "VOUT", "VC", "NCC"))
+        fb, gnd, vneg = Net("FB"), Net("GND"), Net("VNEG")
+        vin += v1[1], u["VIN"]
+        gnd += v1[2], u["GND"], co[2], rl[2], cc[2], vn[2]
+        vneg += vn[1], rb[2]                          # -1 V rail feeds Rbot
+        sw += u["SW"], l1[1]
+        vout += l1[2], u["VOUT"], co[1], rl[1], rt[1]
+        fb += rt[2], rb[1], u["FB"]                   # tap sits at -0.8 V
+        vc += u["VC"], rc[1]
+        ncc += rc[2], cc[1]
+    return ckt
+
+
+# Ideal FB tap voltage of the negative-reference variant (for the driver's check).
+VOUT_INVFB = VOUT_NOM                                 # positive rail, negative FB ref
+FB_INVFB = (VOUT_NOM * 10.0 + (-1.0) * 205.0) / 215.0  # = -0.8 V
+
+
 def averaged_buck_loop():
     """The SAME buck power stage on Stage 28.D's averaged ``BUCK mode=avg cmode=peak``
     model, FB tap split by a VSIN(ac=1) for the ``.ac`` loop-gain cross-check
