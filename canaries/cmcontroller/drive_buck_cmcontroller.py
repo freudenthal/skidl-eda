@@ -31,14 +31,24 @@ failed, 2 = backend unavailable.
       the error amp regulates FB to a negative reference (the LT3757 dual-reference
       path), not just a positive one. The true negative-OUTPUT inverting-FBX converter
       needs an inverting power stage (Stage 29.4); here the buck output stays positive.
+  T6  SHORT-CIRCUIT PROTECTION (Stage 29.3): driven into a hard short with the peak
+      current limit (VSENSE_MAX) and two-state frequency foldback (FB_FOLD/FOLD_RATIO)
+      enabled, the inductor current clamps at ~VSENSE_MAX/RI cycle-by-cycle and the
+      switching folds to FSW*FOLD_RATIO (V(FB) collapses below the foldback threshold),
+      while the rail collapses at constant current instead of running away.
+  T7  UVLO (Stage 29.3): with VIN ramped 0 -> 12 V, the gate is held off until VIN
+      rises past UVLO_RISE (~133 us on the ramp), then the buck turns on and regulates
+      -- the hysteretic run latch gates the whole controller under an under-voltage input.
 
-A startup ``.tran`` plot (VOUT, VC, gate) and the averaged loop-gain Bode are saved
-to ``sim_plots/``.
+A startup ``.tran`` plot (VOUT, VC, gate), the averaged loop-gain Bode, and a
+short-circuit protection ``.tran`` (VOUT, inductor current, gate) are saved to
+``sim_plots/``.
 
 HONEST BOUNDARY: behavioral emulation of a current-mode controller's datasheet specs,
-NOT the encrypted silicon. CCM; max-duty is the only supervisory feature here
-(soft-start/current-limit/foldback are Stage 29.3). See buck_cmcontroller.py for the
-full note and the design inputs (GM/RI/slope are datasheet-anchored, not measured).
+NOT the encrypted silicon. CCM; the supervisory features are the parameterized soft-
+start / current-limit / foldback / UVLO / max-duty (Stage 29.3), not die-level
+protection corners. See buck_cmcontroller.py for the full note and the design inputs
+(GM/RI/slope are datasheet-anchored, not measured).
 """
 
 from __future__ import annotations
@@ -59,6 +69,7 @@ FSW_2 = FSW / 2.0
 PER = 1.0 / FSW
 PLOT_TRAN = os.path.join(os.path.dirname(__file__), "sim_plots", "cmc_buck_startup.png")
 PLOT_BODE = os.path.join(os.path.dirname(__file__), "sim_plots", "cmc_buck_avg_loop.png")
+PLOT_SHORT = os.path.join(os.path.dirname(__file__), "sim_plots", "cmc_buck_shortcircuit.png")
 
 # Diode-corrected ideal duty of the emitted non-synchronous buck (Vf ~= 0.6 V).
 DUTY_IDEAL = (B.VOUT_NOM + 0.6) / (float(B.VIN) + 0.6)
@@ -120,6 +131,32 @@ def _save_tran_plot(t, vo, vc, g):
     ax2.grid(True, ls=":", alpha=0.6)
     fig.tight_layout(); fig.savefig(PLOT_TRAN)
     print(f"RESULT tran plot saved: {PLOT_TRAN}")
+
+
+def _save_short_plot(t, vo, il, g):
+    """Short-circuit protection .tran: VOUT, inductor current (clamped), gate."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as e:  # noqa: BLE001
+        print(f"RESULT short plot SKIPPED (matplotlib unavailable: {type(e).__name__})")
+        return
+    os.makedirs(os.path.dirname(PLOT_SHORT), exist_ok=True)
+    fig = plt.figure(figsize=(8, 6))
+    ax1 = fig.add_subplot(2, 1, 1)
+    ax1.plot(t * 1e6, vo, color="C0", label="VOUT")
+    ax1.plot(t * 1e6, il, color="C3", lw=0.8, label="|iL|")
+    ax1.axhline(B.VSENSE_MAX / B.RI, color="k", ls=":", lw=0.6, label="i-limit")
+    ax1.set_ylabel("V / A"); ax1.legend(loc="upper right", fontsize=8)
+    ax1.set_title("CMCONTROLLER buck -- short-circuit: current limit + freq foldback")
+    ax1.grid(True, ls=":", alpha=0.6)
+    ax2 = fig.add_subplot(2, 1, 2, sharex=ax1)
+    ax2.plot(t * 1e6, g, color="C2", lw=0.5)
+    ax2.set_ylabel("gate (V)"); ax2.set_xlabel("time (us)")
+    ax2.grid(True, ls=":", alpha=0.6)
+    fig.tight_layout(); fig.savefig(PLOT_SHORT)
+    print(f"RESULT short plot saved: {PLOT_SHORT}")
 
 
 def _save_bode_plot(res, xo, pm):
@@ -285,6 +322,53 @@ def main() -> int:
         print(f"RESULT T5 dual-ref (VREF<0): VOUT={vo_inv:.3f}V ({vo_err * 100:+.1f}%) "
               f"FB={fb_inv:+.3f}V (target {B.FB_INVFB:+.3f}, <0) "
               f"{'PASS' if t5 else 'FAIL'}")
+
+        # --- T6 short-circuit protection: current limit + foldback (Stage 29.3) ---
+        sc = _tran(B.cmc_buck_shortcircuit(), end_time=240e-6)
+        tsc = np.asarray(sc.analysis.time, dtype=float)
+        vosc = np.asarray(sc.analysis["VOUT"], dtype=float)
+        ilsc = np.abs(np.asarray(sc.analysis.branches["ll1"], dtype=float))
+        gsc = np.asarray(sc.analysis["U1_gate"], dtype=float)
+        fbsc = np.asarray(sc.analysis["FB"], dtype=float)
+        ilim = B.VSENSE_MAX / B.RI                        # ~3 A
+        ipk = float(ilsc.max())
+        msc = tsc > (tsc[-1] - 120e-6)                    # settled short tail
+        rz = int(np.sum((gsc[:-1] < 2.5) & (gsc[1:] >= 2.5) & (tsc[:-1] > tsc[-1] - 120e-6)))
+        fsw_sc = rz / (tsc[msc][-1] - tsc[msc][0])
+        folded = FSW * B.FOLD_RATIO
+        fb_sc = float(fbsc[msc].mean())
+        t6 = (
+            np.isfinite(vosc).all() and np.isfinite(ilsc).all()
+            and ipk <= ilim * 1.6                          # cycle-by-cycle clamp
+            and float(vosc[-1]) < 0.7 * B.VOUT_REG         # rail collapses
+            and fb_sc < B.FB_FOLD                          # genuinely in foldback
+            and abs(fsw_sc - folded) / folded <= 0.35      # switching folded
+        )
+        _save_short_plot(tsc, vosc, ilsc, gsc)
+        print(f"RESULT T6 short-circuit: iL_pk={ipk:.2f}A (limit ~{ilim:.1f}A) "
+              f"fsw={fsw_sc / 1e3:.0f}kHz (folded {folded / 1e3:.0f}k) "
+              f"VOUT={float(vosc[-1]):.2f}V (collapsed) {'PASS' if t6 else 'FAIL'}")
+
+        # --- T7 UVLO: gate held off until VIN rises past the lockout (Stage 29.3) --
+        uv = _tran(B.cmc_buck_uvlo(), end_time=360e-6)
+        tuv = np.asarray(uv.analysis.time, dtype=float)
+        guv = np.asarray(uv.analysis["U1_gate"], dtype=float)
+        vouv = np.asarray(uv.analysis["VOUT"], dtype=float)
+        tc = B.UVLO_T_CROSS
+        pre = tuv[:-1] < tc - 10e-6
+        post = tuv[:-1] > tc + 15e-6
+        rises_pre = int(np.sum((guv[:-1] < 2.5) & (guv[1:] >= 2.5) & pre))
+        rises_post = int(np.sum((guv[:-1] < 2.5) & (guv[1:] >= 2.5) & post))
+        vo_uv = float(vouv[tuv > (tuv[-1] - 40e-6)].mean())
+        t7 = (
+            np.isfinite(vouv).all()
+            and rises_pre <= 1                             # quiet below UVLO
+            and rises_post > 20                            # switching above UVLO
+            and abs(vo_uv - B.VOUT_REG) / B.VOUT_REG <= 0.06   # regulates once on
+        )
+        print(f"RESULT T7 UVLO: rises_before={rises_pre} (<=1) rises_after={rises_post} "
+              f"(>20) VOUT_on={vo_uv:.3f}V (t_cross={tc * 1e6:.0f}us) "
+              f"{'PASS' if t7 else 'FAIL'}")
     except Exception as e:  # noqa: BLE001
         import traceback
 
@@ -292,7 +376,7 @@ def main() -> int:
         print(f"RESULT cmc-buck BACKEND-UNAVAILABLE: {type(e).__name__}: {str(e)[:120]}")
         return 2
 
-    ok = t1 and t2 and t3 and t4 and t5
+    ok = t1 and t2 and t3 and t4 and t5 and t6 and t7
     print(f"RESULT cmc-buck ALL {'PASS' if ok else 'FAIL'} "
           f"(closed-loop behavioral emulation; NOT the encrypted current-mode IC)")
     return 0 if ok else 1

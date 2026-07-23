@@ -7,14 +7,16 @@
   ``cmcontroller`` provenance -- NOT an open-loop switch macromodel and NOT the 28.D
   averaged model;
 * a gated live check that the closed loop starts from 0 V and regulates, switches at
-  FSW, the 28.D averaged model cross-checks it, and a D>0.5 point stays
-  subharmonically stable -- skipped if the ngspice backend or the KiCad-10 symbols
-  are absent. Full acceptance (all four criteria + the saved startup / loop-gain
-  plots) lives in ``canaries/cmcontroller/drive_buck_cmcontroller.py``.
+  FSW, the 28.D averaged model cross-checks it, a D>0.5 point stays subharmonically
+  stable, a negative reference regulates FB<0, and the Stage 29.3 supervisory features
+  behave (short-circuit current limit + frequency foldback, UVLO) -- skipped if the
+  ngspice backend or the KiCad-10 symbols are absent. Full acceptance (all seven
+  criteria T1-T7 + the saved startup / loop-gain / short-circuit plots) lives in
+  ``canaries/cmcontroller/drive_buck_cmcontroller.py``.
 
 HONEST BOUNDARY: behavioral emulation of a current-mode controller's datasheet specs,
-NOT the encrypted silicon. CCM; max-duty is the only supervisory feature here
-(soft-start/current-limit/foldback are Stage 29.3). See
+NOT the encrypted silicon. CCM; the supervisory features are the parameterized soft-
+start / current-limit / foldback / UVLO / max-duty (Stage 29.3). See
 canaries/cmcontroller/buck_cmcontroller.py for the full note.
 """
 
@@ -81,9 +83,10 @@ def test_cmcontroller_emits_closed_loop_pwm_engine():
 
 
 def test_cmcontroller_buck_acceptance():
-    """Gated live: the acceptance driver's four criteria all pass on real ngspice
-    (regulation from 0 V, settled switching at FSW, the 28.D regime cross-check, and
-    D>0.5 slope-comp subharmonic stability)."""
+    """Gated live: the acceptance driver's seven criteria all pass on real ngspice
+    (regulation from 0 V, settled switching at FSW, the 28.D regime cross-check, D>0.5
+    slope-comp subharmonic stability, the negative-reference dual-ref loop, and the
+    Stage 29.3 supervisory features -- short-circuit current limit + foldback, UVLO)."""
     _need_kicad10()
     try:
         from skidl.sim import simulate  # noqa: F401

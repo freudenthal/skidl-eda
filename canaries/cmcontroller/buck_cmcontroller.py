@@ -25,13 +25,20 @@ Two regimes on one power stage:
     ``BUCK mode=avg cmode=peak`` averaged model, FB tap split by a VSIN(ac=1) for
     ``.ac`` loop gain (crossover / phase margin). The two must agree (the 29.1 gate).
 
+Stage 29.3 adds the supervisory features that make this a real controller: a
+**soft-start** reference ramp (TSS, bounding startup inrush), a cycle-by-cycle **peak
+current limit** (VSENSE_MAX), **two-state frequency foldback** (FB_FOLD/FOLD_RATIO),
+and **UVLO** on VIN (UVLO_RISE/UVLO_FALL) -- each demonstrated by a builder below and
+a driver criterion. Load-transient recovery needs no extra modeling (it is the loop's
+own step response).
+
 HONEST BOUNDARY (read before trusting a number): this is a **behavioral emulation
 of a current-mode controller's headline datasheet specs, NOT the encrypted silicon**.
 CCM only; no thermal / gate-charge / protection corner cases beyond the parameterized
-ones (max-duty here; soft-start/current-limit/foldback are Stage 29.3). GM, RI and
-the slope factor are datasheet-anchored *design inputs*, not measured from the part.
-The controller IC itself stays un-modeled; this replaces it with a generic B-source
-core (the Intusoft/Basso "write a generic model, adapt its parameters" method).
+ones. GM, RI and the slope factor are datasheet-anchored *design inputs*, not measured
+from the part. The controller IC itself stays un-modeled; this replaces it with a
+generic B-source core (the Intusoft/Basso "write a generic model, adapt its
+parameters" method).
 
 DEVIATIONS (documented):
   * The switch stage is **non-synchronous** (a freewheel diode, not a sync FET), so
@@ -64,6 +71,13 @@ MCSLOPE = 0.1          # slope-comp ramp volts/period (switching model knob)
 SS_T = 60e-6           # soft-reference ramp time
 ISTEP = 0.5            # load-step magnitude (A)
 T_STEP = 300e-6        # load-step time
+
+# Supervisory features (Stage 29.3)
+VSENSE_MAX = 0.3       # peak current limit sense voltage -> ~VSENSE_MAX/RI = 3 A
+FB_FOLD = 0.4          # frequency-foldback FB threshold (below 0.8 V regulated)
+FOLD_RATIO = 0.25      # folded clock = FSW*FOLD_RATIO = 125 kHz
+UVLO_RISE = 8.0        # under-voltage lockout rising threshold on VIN
+UVLO_FALL = 7.0        # under-voltage lockout falling threshold (hysteresis)
 
 # Ideal regulated rail from the real divider and the reference.
 VOUT_REG = VREF * (43.0 + 13.7) / 13.7   # ~= 3.311 V
@@ -234,6 +248,92 @@ def cmc_buck_invfb(tss: float = SS_T):
 # Ideal FB tap voltage of the negative-reference variant (for the driver's check).
 VOUT_INVFB = VOUT_NOM                                 # positive rail, negative FB ref
 FB_INVFB = (VOUT_NOM * 10.0 + (-1.0) * 205.0) / 215.0  # = -0.8 V
+
+
+def cmc_buck_shortcircuit(tss: float = 20e-6, rload: str = "0.4"):
+    """Short-circuit protection demo (Stage 29.3): the same buck with the **peak
+    current limit** and **two-state frequency foldback** enabled, driven into a hard
+    short (0.4 ohm). The cycle-by-cycle limit clamps the inductor current at
+    ~VSENSE_MAX/RI (~3 A), and because V(FB) collapses far below FB_FOLD the latch is
+    clocked by the folded clock (FSW*FOLD_RATIO = 125 kHz), so the switching slows.
+    Together these are how a real controller survives a sustained output short."""
+    from skidl import Circuit, Net, Part
+
+    ckt = Circuit(name="cmc_buck_short")
+    with ckt:
+        u = _cmc_part(
+            Sim_Device="CMCONTROLLER",
+            Sim_Params=(
+                f"topology=buck fsw={FSW / 1e3:g}k vout={VOUT_NOM:g} vin={VIN} "
+                f"vref={VREF:g} ri={RI:g} gm={GM:g} mcslope={MCSLOPE:g} "
+                f"tss={tss:g} vsense_max={VSENSE_MAX:g} fb_fold={FB_FOLD:g} "
+                f"fold_ratio={FOLD_RATIO:g}"
+            ),
+            Note="short-circuit protection: peak current limit + frequency foldback",
+        )
+        v1 = Part("Simulation_SPICE", "VDC", ref="V1", value=VIN)
+        l1 = Part("Device", "L", ref="L1", value=L)
+        co = Part("Device", "C", ref="C1", value=COUT)
+        rl = Part("Device", "R", ref="RL", value=rload)   # hard short
+        rt = Part("Device", "R", ref="RT", value=R_TOP)
+        rb = Part("Device", "R", ref="RB", value=R_BOT)
+        rc = Part("Device", "R", ref="RC", value=RC)
+        cc = Part("Device", "C", ref="CC", value=CC)
+        vin, sw, vout, vc, ncc = (Net(n) for n in ("VIN", "SW", "VOUT", "VC", "NCC"))
+        fb, gnd = Net("FB"), Net("GND")
+        vin += v1[1], u["VIN"]
+        gnd += v1[2], u["GND"], co[2], rl[2], rb[2], cc[2]
+        sw += u["SW"], l1[1]
+        vout += l1[2], u["VOUT"], co[1], rl[1], rt[1]
+        fb += rt[2], rb[1], u["FB"]
+        vc += u["VC"], rc[1]
+        ncc += rc[2], cc[1]
+    return ckt
+
+
+def cmc_buck_uvlo(tss: float = 20e-6):
+    """UVLO demo (Stage 29.3): VIN is ramped 0 -> 12 V (a VPULSE with a 200 us rise)
+    and the controller has UVLO_RISE=8 / UVLO_FALL=7. The gate is held off until VIN
+    rises past 8 V (~133 us), then the buck turns on and regulates. Proves the
+    hysteretic run latch gates the whole controller under an under-voltage input."""
+    from skidl import Circuit, Net, Part
+
+    ckt = Circuit(name="cmc_buck_uvlo")
+    with ckt:
+        u = _cmc_part(
+            Sim_Device="CMCONTROLLER",
+            Sim_Params=(
+                f"topology=buck fsw={FSW / 1e3:g}k vout={VOUT_NOM:g} vin={VIN} "
+                f"vref={VREF:g} ri={RI:g} gm={GM:g} mcslope={MCSLOPE:g} "
+                f"tss={tss:g} uvlo_rise={UVLO_RISE:g} uvlo_fall={UVLO_FALL:g}"
+            ),
+            Note="UVLO: gate held off until VIN rises past the lockout threshold",
+        )
+        # VIN ramps 0 -> 12 V over 200 us (crosses 8 V at ~133 us), then holds.
+        vr = Part("Simulation_SPICE", "VPULSE", ref="V1", value="0",
+                  Note="ramping input rail (0 -> 12 V) to exercise UVLO")
+        vr.Sim_Params = "v1=0 v2=12 td=0 tr=200u tf=1u pw=1 per=2"
+        l1 = Part("Device", "L", ref="L1", value=L)
+        co = Part("Device", "C", ref="C1", value=COUT)
+        rl = Part("Device", "R", ref="RL", value=RLOAD)
+        rt = Part("Device", "R", ref="RT", value=R_TOP)
+        rb = Part("Device", "R", ref="RB", value=R_BOT)
+        rc = Part("Device", "R", ref="RC", value=RC)
+        cc = Part("Device", "C", ref="CC", value=CC)
+        vin, sw, vout, vc, ncc = (Net(n) for n in ("VIN", "SW", "VOUT", "VC", "NCC"))
+        fb, gnd = Net("FB"), Net("GND")
+        vin += vr[1], u["VIN"]
+        gnd += vr[2], u["GND"], co[2], rl[2], rb[2], cc[2]
+        sw += u["SW"], l1[1]
+        vout += l1[2], u["VOUT"], co[1], rl[1], rt[1]
+        fb += rt[2], rb[1], u["FB"]
+        vc += u["VC"], rc[1]
+        ncc += rc[2], cc[1]
+    return ckt
+
+
+# UVLO input crossing time for the driver's check (VIN = UVLO_RISE on the 0->12/200us ramp).
+UVLO_T_CROSS = UVLO_RISE / 12.0 * 200e-6
 
 
 def averaged_buck_loop():
