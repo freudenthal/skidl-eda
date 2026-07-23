@@ -48,6 +48,9 @@ def plan_pcb(
     fp_lib_dirs: Optional[List[str]] = None,
     outline=None,
     strict_footprints: bool = False,
+    power_copper: bool = False,
+    power_copper_workdir: Optional[str] = None,
+    board_layers: int = 2,
     **plan_kwargs: Any,
 ) -> Dict[str, Any]:
     """Plan a board layout for ``circuit`` and (optionally) write a scored PCB.
@@ -65,6 +68,16 @@ def plan_pcb(
             are omitted from the board rather than blocking it -- they are still
             counted in ``missing_refs``. Set True for a physical-BOM design where
             a missing footprint is a real defect.
+        power_copper: opt-in (default **False** -> byte-identical). When True and
+            ``output_path`` is set, emit real power copper (wide power tracks +
+            poured planes) via ``skidl_layout.emit_power_copper`` after the
+            placement, and record its parsed summary under the ``power_copper``
+            key. Report-only: any failure (KRT missing, route error) is appended
+            to ``errors`` and never fails the step. Requires a KiCadRoutingTools
+            checkout.
+        power_copper_workdir: scratch dir for the power-copper route/pour boards
+            (default ``<output_path>_power_copper``).
+        board_layers: layer count passed to the power-copper pour (default 2).
         **plan_kwargs: forwarded verbatim to ``skidl_layout.plan_layout``.
             Fast in-loop iteration knobs live here: ``candidate_names=[...]`` or
             ``max_candidates=N`` prune the 8-candidate portfolio, and
@@ -136,11 +149,35 @@ def plan_pcb(
         except Exception as e:  # noqa: BLE001
             m.errors.append(f"PCB write failed: {e}")
 
-    return _metrics_to_dict(m, written_path)
+    # --- opt-in power copper (report-only; default OFF -> byte-identical) ----
+    power_copper_result: Optional[Dict[str, Any]] = None
+    if power_copper:
+        if not output_path:
+            m.errors.append("power_copper requested but no output_path given; skipped")
+        else:
+            fp_dirs = fp_lib_dirs
+            if not fp_dirs:
+                root = discover_footprint_dir()
+                fp_dirs = [root] if root else []
+            workdir = power_copper_workdir or (output_path + "_power_copper")
+            try:
+                pcr = sl.emit_power_copper(
+                    result, circuit, fp_lib_dirs=fp_dirs, workdir=workdir,
+                    board_layers=board_layers,
+                )
+                power_copper_result = pcr.to_dict()
+            except Exception as e:  # noqa: BLE001
+                m.errors.append(f"power copper failed: {e}")
+
+    return _metrics_to_dict(m, written_path, power_copper_result)
 
 
-def _metrics_to_dict(m, written_path: Optional[str]) -> Dict[str, Any]:
-    return {
+def _metrics_to_dict(
+    m,
+    written_path: Optional[str],
+    power_copper_result: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    result = {
         "ok": m.layout_ok,
         "skipped": False,
         "score": m.layout_score,
@@ -153,3 +190,7 @@ def _metrics_to_dict(m, written_path: Optional[str]) -> Dict[str, Any]:
         "pcb_path": written_path,
         "errors": list(m.errors),
     }
+    # Present only when power copper ran -> default result shape unchanged.
+    if power_copper_result is not None:
+        result["power_copper"] = power_copper_result
+    return result

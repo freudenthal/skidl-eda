@@ -74,6 +74,28 @@ def test_layout_unavailable_is_raised(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
+def test_metrics_dict_power_copper_key_is_conditional():
+    """Default result shape is unchanged; the power_copper key appears only when
+    power copper actually ran (opt-in -> byte-identical default)."""
+    from types import SimpleNamespace
+    from skidl_eda.layout import _metrics_to_dict
+
+    m = SimpleNamespace(
+        layout_ok=True, layout_score=90.0, overlaps=0, outline_violations=0,
+        missing_refs=0, hpwl_total_mm=1.0, part_count_placed=3,
+        pcb_written=False, errors=[],
+    )
+    default = _metrics_to_dict(m, None)
+    assert "power_copper" not in default
+    assert set(default) == {
+        "ok", "skipped", "score", "overlaps", "outline_violations",
+        "missing_refs", "hpwl_total_mm", "parts_placed", "pcb_written",
+        "pcb_path", "errors",
+    }
+    with_pc = _metrics_to_dict(m, None, {"plane_nets": ["GND"]})
+    assert with_pc["power_copper"] == {"plane_nets": ["GND"]}
+
+
 def test_plan_pcb_writes_scored_board(tmp_path):
     _layout_or_skip()
     _kicad10_or_skip()
