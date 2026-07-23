@@ -527,6 +527,39 @@ entry point and the `Sim_*` attribute spelling differ.
     `dt≈25 n`. See `canaries/sepic/`.
   Direction of power flow is set purely by **where you attach source vs. load**
   (swap them for reverse/boost-up or Zeta), not by any mode-select logic.
+- **Closed-loop switching controllers (`Sim_Device="CMCONTROLLER"`).** The
+  large-signal, cycle-accurate **closed-loop** regime the open-loop macromodels
+  above (duty swept) and the averaged model (small-signal `.ac`) cannot reach: a
+  behavioral **peak-current-mode** controller that generates the real gate from
+  feedback and **regulates a live rail in `.tran`** — datasheet-style soft-start,
+  cycle-by-cycle current limit, frequency foldback, UVLO, and load-transient
+  recovery (free from the loop). It emits its **own** switch stage; you supply the
+  real inductor(s), Cout, divider (`VOUT→FB→GND`) and the VC/ITH compensation
+  network — the same parts the averaged model uses, so the two cross-check. Pins
+  `VIN`/`SW`/`VOUT`/`FB`/`VC`/`GND` (plus `SW2`=node B for SEPIC/Ćuk). Required
+  `Sim_Params`: `vref` (FB reference, **may be negative** for an inverting output)
+  and `fsw`; plus `topology=` (default `buck`; also `boost`/`sepic`/`cuk`/`flyback`)
+  and `ri`/`gm`/`mcslope` (current-sense gain / error-amp gm / slope-comp —
+  datasheet-anchored design inputs).
+  * **Supervisory features**, each behind its own param (**absent = off**):
+    `vsense_max` (cycle-by-cycle peak current limit), `tss` (soft-start ramp),
+    `fb_fold`/`fold_ratio` (two-state frequency foldback), `uvlo_rise`/`uvlo_fall`,
+    `ton_min`, `dmax`, plus error-amp `vhigh`/`vlow` + `isource`/`isink` clamps.
+  * **Chip profiles:** `Sim_Params="chip=LT3757 topology=boost"` fills every
+    controller param from a datasheet-anchored preset (**explicit params override**;
+    an unknown chip warns + falls back). Ships **LT3757** and **LTC3851**.
+  * **Ćuk is inverting** — a real **negative** rail: `topology=cuk` with a negative
+    `vref` (e.g. `vref=-0.8`); the error amp uses the LT3757 FBX negative-output
+    sense to keep the loop stable on the negative rail.
+  * **Convergence:** `stiff=True` + `use_initial_condition=True` + seed `{VOUT:0}`
+    + `max_time≈per/50` (memory caps carry `IC=0`); a nonzero `tss` eases the op
+    point. See `canaries/cmcontroller/`.
+  **Honest boundary:** a *behavioral emulation of a controller's headline datasheet
+  specs*, **not** the encrypted vendor silicon — CCM only, no thermal / gate-charge
+  / protection corners beyond the parameterized ones. A **boost cannot
+  current-limit a hard short** (inductor + rectifier are a direct VIN→VOUT path), so
+  its limit applies under overload; a Ćuk (coupling cap blocks DC) protects a short.
+  Flyback is CCM and needs your real coupled transformer + a primary clamp.
 - **Multi-winding transformers.** `Transformer_1P_1S` (AA/AB, SA/SB),
   `Transformer_1P_2S` (adds an independent SC/SD secondary), and the
   center-tapped `Transformer_1P_SS` (SA/SC/SB, SC = tap) all simulate as coupled
@@ -663,10 +696,14 @@ entry point and the `Sim_*` attribute spelling differ.
 - **Honest remaining limits (say so rather than approximating):**
   forward-converter and other single-ended isolated topologies are **not**
   simulatable yet (no forward-reset model). The half-bridge/LLC and the
-  bidirectional buck-boost/SEPIC models are **open-loop only** — duty (and, for
-  multi-leg parts, phase) is the control variable, with no error amp, compensator,
-  burst-mode / frequency-control feedback loop, or current-limit / thermal
-  foldback. They are **ideal-switch** models, so switching losses are
+  bidirectional buck-boost/SEPIC **switch macromodels** are **open-loop** — duty
+  (and, for multi-leg parts, phase) is the control variable, with no error amp or
+  compensator. **Closed-loop** buck/boost/SEPIC/Ćuk (soft-start, cycle-by-cycle
+  current limit, frequency foldback, UVLO, load-transient recovery) is available via
+  `Sim_Device="CMCONTROLLER"` (above) — still a behavioral emulation of datasheet
+  specs, not vendor silicon, CCM-only; burst-mode / hysteretic / COT control and
+  thermal foldback stay unmodeled. These open-loop macromodels are **ideal-switch**
+  models, so switching losses are
   underestimated and a real rail lands a few % below the ideal-gain line (the
   `vout=…` convenience is that ideal-lossless estimate — sweep duty to see the
   true rail). "**Bidirectional**" means only that the synchronous switches conduct
