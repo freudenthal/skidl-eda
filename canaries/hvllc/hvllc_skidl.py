@@ -19,6 +19,18 @@ is honestly untestable in isolation but works in-circuit) and the LT1364 op-amp
 Open-loop: the PWM frequency is the control variable and the LLC gain is
 characterized by sweeping FSW across ``.tran`` runs (see drive_hvllc.py).
 
+**Stage 30.4 saturable-core variant** (``hvllc_sim_sat`` / ``tank_sat``, driven by
+``drive_hvllc_sat.py``): a SECOND operating point on the same tank -- a ~1:50
+step-up at ~3.5 W -- built with the Stage-30.1 flyback-friendly spelling
+(explicit magnetizing ``lm`` + a real leakage ``llk`` in henries, k~=0.999 as a
+byte cross-check against the legacy ``lp/k`` form) and the Stage-30.2 saturable
+core (``isat`` knee). A bus-overvoltage fault walks the magnetizing flux past the
+knee and the magnetizing current RUNS AWAY versus a matched linear core -- core
+saturation, simulated. The 72 W / N=78 baseline below is kept byte-for-byte.
+HONEST BOUNDARY: the knee is a behavioral flux-node model (no hysteresis, no core
+loss, no thermal); in an LLC the runaway shows in the MAGNETIZING current (read
+from the flux node), not the resonant tank current.
+
 Two hard-won lessons live in the geometry:
   * the PWM starts HIGH so the inverter holds the driver IN low -> low-side on
     at t=0 -> the bootstrap cap charges before the first high-side turn-on;
@@ -46,6 +58,30 @@ GATE_RG = "10"         # gate series resistor
 FR = 1.0 / (2.0 * math.pi * math.sqrt(LR * CR))
 FP = FR / math.sqrt(1.0 + LM / LR)
 
+# ---- Stage 30.4: ~1:50 / ~3.5 W saturable-core variant -----------------------
+# A SECOND operating point on the SAME tank (Lr/Cr/Lm unchanged, fr~=50 kHz), the
+# transformer retuned to a ~1:50 step-up and the load re-picked for ~3.5 W, using
+# the Stage-30.1 flyback-friendly spelling (explicit magnetizing Lm + a real
+# leakage Llk in henries) and the Stage-30.2 saturable core (isat knee). The
+# 72 W / N=78 baseline above (`hvllc_sim`) is kept byte-for-byte for regression.
+NTURNS_SAT = 50.0      # ~1:50 step-up (retuned from N=78)
+LM_SAT = 140e-6        # magnetizing inductance, primary-referred (= old LP)
+# Residual winding leakage. In THIS LLC the resonant series inductor Lr is a
+# discrete part, so the transformer's own leakage is small: pick Llk to make the
+# derived k = sqrt(Lm/(Lm+Llk)) land at the old 0.999 -- a byte cross-check
+# against the legacy lp/k form (Llk = Lm*(1/k^2 - 1) ~= 0.2 % of Lm).
+LLK_SAT = LM_SAT * (1.0 / 0.999 ** 2 - 1.0)   # ~0.28 uH -> k ~= 0.999
+# Saturation knee (magnetizing current, A). The 50 kHz nominal magnetizing peak
+# is ~Vp/(2*pi*fsw*Lm) ~= 15 V / (2*pi*50k*140u) ~= 0.34 A, so a 0.55 A knee keeps
+# nominal clean (below knee) while a bus-overvoltage fault (flux ~proportional to
+# Vbus) walks the flux past it into runaway. (Lowering fsw does NOT saturate: the
+# resonant tank clamps the magnetizing volt-seconds.) Numerical knee, NOT datasheet.
+ISAT_SAT = 0.55
+RLOAD_SAT = "85k"      # sized for ~3.55 W at ~549 Vrms (see hvllc_sim_sat docstring)
+VBUS_FAULT = "40"      # bus-overvoltage fault (~1.7x): walks the flux past the knee
+FR_SAT = FR            # same tank -> same series resonance
+FP_SAT = FR / math.sqrt(1.0 + LM_SAT / LR)
+
 
 def _corpus_lib(*parts: str) -> str:
     """Resolve an explicit corpus model file under SKIDL_SPICE_LIB_PATH (which
@@ -65,9 +101,9 @@ def pwm_params(fsw: float) -> str:
 
 
 @subcircuit
-def supply(vin, vcc12, gnd):
-    """24 V bus source + 24->12 V LDO for the gate-drive rail."""
-    v1 = Part("Simulation_SPICE", "VDC", ref="V1", value=VIN)
+def supply(vin, vcc12, gnd, vbus: str = VIN):
+    """Bus source (``vbus`` V, default 24) + bus->12 V LDO for the gate-drive rail."""
+    v1 = Part("Simulation_SPICE", "VDC", ref="V1", value=vbus)
     u3 = Part("Regulator_Linear", "L7812", ref="U3", value="L7812",
               Sim_Device="LDO", Sim_Params="vout=12 vdrop=1.2 rser=0.2 iq=5m")
     v1[1] += vin; v1[2] += gnd
@@ -182,5 +218,67 @@ def hvllc_sim(fsw: float = 50e3) -> Circuit:
         gatedrive(vin, vcc12, gnd, sw, gh, gl, fsw)
         powerstage(vin, gnd, sw, gh, gl)
         tank(sw, gnd, hv_out)
+        monitor(hv_out, vcc12, gnd)
+    return ckt
+
+
+@subcircuit
+def tank_sat(sw, gnd, hv_out, *, saturate: bool, isat: float, n: float, rload: str):
+    """LLC tank + a ~1:50 **Stage-30.1/30.2** transformer (explicit lm/llk, opt. isat).
+
+    Same Lr-Cr as ``tank`` (fr~=50 kHz) but the transformer is spelled in the
+    flyback-friendly magnetizing form: ``lm``/``llk``/``n`` (so leakage is a real
+    henries value, and the derived k~=0.999 cross-checks the legacy ``lp/k``
+    emission). ``saturate=True`` adds the Stage-30.2 ``isat`` knee, turning the
+    magnetizing branch into the behavioral flux-node saturable core; ``False`` is
+    the linear coupled-inductor reference at the identical operating point.
+    """
+    lr = Part("Device", "L", ref="LR", value=str(LR))
+    cr = Part("Device", "C", ref="CR", value=str(CR))
+    sat = f" isat={isat:g}" if saturate and isat > 0 else ""
+    t1 = Part("Device", "Transformer_1P_1S", ref="T1",
+              Sim_Params=f"lm={LM_SAT} llk={LLK_SAT} n={n:g}{sat}")
+    rl = Part("Device", "R", ref="RL", value=rload)
+    co = Part("Device", "C", ref="CO", value=COUT)
+
+    res = Net("RES"); pria = Net("PRIA")
+    sw += lr[1]
+    res += lr[2], cr[1]
+    pria += cr[2], t1["AA"]
+    gnd += t1["AB"]
+    # step-up secondary: SB -> GND, SA = HV_OUT
+    hv_out += t1["SA"], rl[1], co[1]
+    gnd += t1["SB"], rl[2], co[2]
+
+
+def hvllc_sim_sat(fsw: float = 50e3, *, saturate: bool = True,
+                  isat: float = ISAT_SAT, n: float = NTURNS_SAT,
+                  rload: str = None, vbus: str = VIN) -> Circuit:
+    """HV LLC resonator retuned to **~1:50 step-up, ~3.5 W** with a saturable core.
+
+    Power sizing (see the driver for the measured value): at fr the loaded tank
+    gain is ~unity, so the secondary fundamental is ~n * the primary fundamental.
+    A 24 V half-bridge presents a fundamental of ~(4/pi)*12 ~= 15.3 Vpk at the
+    tank input; at n=50 the secondary is ~15.3*50 ~= 765 Vpk ~= 540 Vrms, so
+    ``P = Vrms^2 / RLOAD``; for ~3.5 W, ``RLOAD ~= 540^2 / 3.5 ~= 83 k``. The
+    driver measures the actual delivered power and asserts ~3.5 W (the gain is not
+    exactly unity, so RLOAD is trimmed against the measurement).
+
+    ``saturate`` toggles the Stage-30.2 ``isat`` knee (True = saturable core,
+    False = the linear coupled-inductor reference at the same point). A
+    ``vbus`` overvoltage is the fault that walks the magnetizing flux past the
+    knee (flux ~proportional to Vbus); the driver uses it for the L4 runaway.
+    """
+    if rload is None:
+        rload = RLOAD_SAT
+    ckt = Circuit(name="hvllc_sim_sat")
+    with ckt:
+        vin = Net("VIN24"); vcc12 = Net("VCC12")
+        gnd = Net("GND"); gnd.drive = POWER
+        sw = Net("SW"); gh = Net("GH"); gl = Net("GL"); hv_out = Net("HV_OUT")
+        supply(vin, vcc12, gnd, vbus=vbus)
+        gatedrive(vin, vcc12, gnd, sw, gh, gl, fsw)
+        powerstage(vin, gnd, sw, gh, gl)
+        tank_sat(sw, gnd, hv_out, saturate=saturate, isat=isat, n=n, rload=rload)
         monitor(hv_out, vcc12, gnd)
     return ckt
