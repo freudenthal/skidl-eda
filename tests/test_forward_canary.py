@@ -279,3 +279,66 @@ def test_forward_tertiary_acceptance():
     if rc == 2:
         pytest.skip("ngspice backend unavailable")
     assert rc == 0, "forward tertiary-reset acceptance driver reported a failed criterion"
+
+
+def test_forward_cl_emits_controller_switch_and_forward_stage():
+    """Build-only (Stage 31.3): the closed-loop forward emits the CMCONTROLLER primary
+    switch stage (SW->GND, latch-gated, sensed) and NO controller rectifier -- the same
+    emission as the flyback -- wired to the 31.2 tertiary-reset forward power stage
+    (transformer + forward rectifier at the SA dot + freewheel + output inductor + reset
+    winding/diode). The controller provenance records topology=forward; this demo passes
+    an explicit dmax=0.48 (per*0.48 = 1.92 us max-duty pulse) for closed-loop transient
+    headroom -- the forward TOPOLOGY default of 0.45 is verified in the fork emission
+    test."""
+    _need_kicad10()
+    try:
+        from skidl.sim import skidl_flat_view
+        from skidl.sim.converter import SpiceConverter
+    except Exception:  # noqa: BLE001
+        pytest.skip("PySpice (skidl.sim) not installed")
+
+    import forward_cl_skidl as F
+
+    ckt = F.forward_cl()
+    with ckt:
+        conv = SpiceConverter(skidl_flat_view())
+        net = str(conv.convert(strict=True))
+
+    # controller: forward primary switch (SW->GND via sense) + sensed on-time current,
+    # and NO controller-emitted rectifier (the canary supplies its own secondary).
+    assert "SU1_ls SW U1_swlo U1_gate 0 SWMU1" in net, net
+    assert "VU1_isns U1_swlo 0 0" in net, net
+    assert "DU1_rect" not in net, net           # forward (like flyback) emits no rectifier
+    # demo passes dmax=0.48 -> per=4us, max-duty pulse fires at 1.92us (still <0.5)
+    assert "VU1_duty U1_rstd 0 PULSE(0 5 1.92e-06 " in net, net
+    # power stage: transformer primary VIN->SW, forward rectifier at the SA dot (SECA),
+    # freewheel, and the tertiary reset diode DR (SD->VIN).
+    assert "LT1_P VIN SW 0.000204" in net, net
+    assert "DDF SECA SWS" in net, net           # forward rectifier (anode at the SA dot)
+    assert "DDFW 0 SWS" in net, net             # freewheel diode
+    assert "DDR SD VIN" in net, net             # tertiary reset diode
+    assert conv.model_provenance["U1"].name == "forward_cmcontroller(vref=1.2, fsw=250k)"
+
+
+def test_forward_cl_acceptance():
+    """Gated live (Stage 31.3): the closed-loop forward driver's G1-G4 all pass on real
+    ngspice -- the CMCONTROLLER forward regulates 12 V -> 5 V CCM-native (G1), holds its
+    core reset while the loop regulates (G2), current-limits a short (G3) and recovers a
+    load step (G4)."""
+    _need_kicad10()
+    try:
+        from skidl.sim import simulate  # noqa: F401
+    except Exception:  # noqa: BLE001
+        pytest.skip("PySpice (skidl.sim) not installed")
+
+    import drive_forward_cl as DCL
+
+    try:
+        rc = DCL.main()
+    except Exception as e:  # noqa: BLE001
+        if "ngspice" in str(e).lower() or "shared" in str(e).lower():
+            pytest.skip(f"ngspice not available: {type(e).__name__}: {str(e)[:80]}")
+        raise
+    if rc == 2:
+        pytest.skip("ngspice backend unavailable")
+    assert rc == 0, "forward closed-loop acceptance driver reported a failed criterion"
