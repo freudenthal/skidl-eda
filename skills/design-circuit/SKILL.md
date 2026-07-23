@@ -538,7 +538,9 @@ entry point and the `Sim_*` attribute spelling differ.
   network — the same parts the averaged model uses, so the two cross-check. Pins
   `VIN`/`SW`/`VOUT`/`FB`/`VC`/`GND` (plus `SW2`=node B for SEPIC/Ćuk). Required
   `Sim_Params`: `vref` (FB reference, **may be negative** for an inverting output)
-  and `fsw`; plus `topology=` (default `buck`; also `boost`/`sepic`/`cuk`/`flyback`)
+  and `fsw`; plus `topology=` (default `buck`; also
+  `boost`/`sepic`/`cuk`/`flyback`/`forward` — forward needs an external transformer
+  + reset winding and defaults `dmax=0.45` to hold `D<0.5`)
   and `ri`/`gm`/`mcslope` (current-sense gain / error-amp gm / slope-comp —
   datasheet-anchored design inputs).
   * **Supervisory features**, each behind its own param (**absent = off**):
@@ -694,14 +696,23 @@ entry point and the `Sim_*` attribute spelling differ.
   10+ minutes. Run sweeps in the **background** with a wait-loop rather than
   blocking the loop; expect it and budget for it.
 - **Honest remaining limits (say so rather than approximating):**
-  forward-converter and other single-ended isolated topologies are **not**
-  simulatable yet (no forward-reset model). The half-bridge/LLC and the
+  Single-switch **forward** converters ARE simulatable (Stage 31): open-loop with
+  either an RCD or a third-winding (tertiary) reset (`canaries/forward/`), and
+  closed-loop via `Sim_Device="CMCONTROLLER"` `topology=forward` (keep `D<0.5` for
+  a 1:1 reset — `dmax` defaults to 0.45). The reset is **volt-second behavioral**:
+  no core remanence/hysteresis (a real core resets to Br, shrinking the usable flux
+  window), the staircase-saturation failure at `D>0.5` is the 30.2 flux-node knee
+  (not a real B-H loop), and isolation is in-silicon only (secondary shares sim
+  GND). **Active-clamp and two-switch forward, push-pull/half-bridge/full-bridge
+  forward-derived topologies, and synchronous secondary rectification remain
+  unmodeled — say so.** The half-bridge/LLC and the
   bidirectional buck-boost/SEPIC **switch macromodels** are **open-loop** — duty
   (and, for multi-leg parts, phase) is the control variable, with no error amp or
   compensator. **Closed-loop** buck/boost/SEPIC/Ćuk (soft-start, cycle-by-cycle
   current limit, frequency foldback, UVLO, load-transient recovery) is available via
   `Sim_Device="CMCONTROLLER"` (above) — still a behavioral emulation of datasheet
-  specs, not vendor silicon, CCM-only; burst-mode / hysteretic / COT control and
+  specs, not vendor silicon, CCM-only; single-switch **forward** (`topology=forward`,
+  `D<0.5`, external transformer + reset) closes the loop too; burst-mode / hysteretic / COT control and
   thermal foldback stay unmodeled. These open-loop macromodels are **ideal-switch**
   models, so switching losses are
   underestimated and a real rail lands a few % below the ideal-gain line (the
