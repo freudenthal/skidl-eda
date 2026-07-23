@@ -80,6 +80,16 @@ VGATE = "10"           # gate high level (>> IRF540N VTO ~4 V)
 RCLAMP = "1k"
 CCLAMP = "10n"
 
+# Tertiary-reset (Stage 31.2) knobs. N2 is the reset-winding turns ratio Nr/Np; N2=1
+# (a 1:1 reset winding) makes the reset take exactly as long as the on-time, forcing
+# D <= 0.5 -- the constraint 31.2 demonstrates by violating it (staircase saturation).
+# With the tertiary winding returning the MAGNETIZING energy to the bus, the RCD is
+# left only to catch the (uncoupled) LEAKAGE spike, so its clamp must sit ABOVE the
+# ~2*Vin reset plateau or it would STEAL the reset from the winding: RCLAMP_TERT=2.2k ->
+# dV = sqrt(P_llk*R) ~ 33 V -> clamp at ~45 V, well above the 24 V reset plateau.
+N2 = 1.0
+RCLAMP_TERT = "2.2k"
+
 
 def gate_params(d: float = D, fsw: float = FSW) -> str:
     """Low-side gate VPULSE (0 -> VGATE) at ``fsw``, duty ``d``. Starts LOW (v1=0) so the
@@ -91,7 +101,8 @@ def gate_params(d: float = D, fsw: float = FSW) -> str:
 
 
 def forward(*, d: float = D, rload: str = RLOAD, rcd: bool = True,
-            llk: str = LLK, isat: float = 0.0, n: float = N):
+            llk: str = LLK, isat: float = 0.0, n: float = N,
+            reset: str = "rcd", n2: float = N2, rclamp: str | None = None):
     """Open-loop single-switch forward converter (12 V -> ~4.6 V, isolated-in-silicon).
 
     Knobs the driver sweeps:
@@ -100,9 +111,18 @@ def forward(*, d: float = D, rload: str = RLOAD, rcd: bool = True,
       * ``isat`` > 0 selects the Stage-30.2 flux-node model (a saturation knee), used
         by W3 with a HIGH knee (``isat=50``) purely as a flux probe -- V(<ref>_flux);
       * ``n`` overrides the turns ratio; ``d`` the duty.
+      * ``reset`` = ``"tertiary"`` (Stage 31.2) swaps T1 to ``Transformer_1P_2S`` and
+        adds a THIRD winding (SC/SD) + a reset diode DR that returns the magnetizing
+        energy to the bus (non-dissipative), the textbook forward reset. Default
+        ``"rcd"`` keeps the 31.1 single-secondary dissipative-clamp reset byte-for-byte.
+      * ``n2`` sets the reset-winding turns ratio Nr/Np (tertiary only; 1 -> D<=0.5);
+      * ``rclamp`` overrides the RCD bleed resistor (default: ``RCLAMP`` for the rcd
+        reset, ``RCLAMP_TERT`` -- higher, so it only catches the leakage spike and does
+        NOT steal the reset -- for the tertiary reset).
     """
     from skidl import Circuit, Net, Part
 
+    tertiary = reset == "tertiary"
     ckt = Circuit(name="forward_openloop")
     with ckt:
         # --- primary: switch + transformer + drain Coss + RCD reset --------------
@@ -110,9 +130,17 @@ def forward(*, d: float = D, rload: str = RLOAD, rcd: bool = True,
         # magnetizing lm + a real primary leakage llk (henries), optionally a
         # Stage-30.2 saturation knee. No `k` -- it is derived from lm/llk.
         sat = f" isat={isat:g}" if isat and isat > 0 else ""
-        t1 = Part("Device", "Transformer_1P_1S", ref="T1",
-                  Sim_Params=f"lm={LM} llk={llk} n={n:g}{sat}",
-                  Note="forward transformer (lm/llk/n; magnetizing = reset target)")
+        if tertiary:
+            # Transformer_1P_2S: the second secondary SC/SD is the 1:1 reset winding
+            # (n2=1 -> ls2=lp, parsed by the existing ratio_ind path). Dots at AA, SA,
+            # SC. Same lm/llk/isat spelling as 31.1 -- just one extra winding.
+            t1 = Part("Device", "Transformer_1P_2S", ref="T1",
+                      Sim_Params=f"lm={LM} llk={llk} n={n:g} n2={n2:g}{sat}",
+                      Note="forward transformer + tertiary reset winding (lm/llk/n/n2)")
+        else:
+            t1 = Part("Device", "Transformer_1P_1S", ref="T1",
+                      Sim_Params=f"lm={LM} llk={llk} n={n:g}{sat}",
+                      Note="forward transformer (lm/llk/n; magnetizing = reset target)")
 
         v1 = Part("Simulation_SPICE", "VDC", ref="V1", value=VIN, Note="input bus")
         m1 = Part("Transistor_FET", "IRF540N", ref="M1", value="IRF540N",
@@ -142,13 +170,35 @@ def forward(*, d: float = D, rload: str = RLOAD, rcd: bool = True,
         sws += df["K"], dfw["K"], lo[1]                # rectifier/freewheel junction -> LO
         vout += lo[2], co[1], rl[1]
 
+        # Tertiary (third-winding) reset (Stage 31.2): the SC/SD winding + diode DR
+        # returns the magnetizing energy to the bus. Dot at SC -> SC to GND, SD to the
+        # DR anode, DR cathode to VIN. During ON V(SC)-V(SD)=+n2*Vin (dot SC high, SC
+        # grounded) -> V(SD)=-n2*Vin -> DR reverse-biased by Vin+n2*Vin (blocks, no
+        # reset current during ON). At turn-off the magnetizing current reverses the
+        # winding, SD swings positive; at V(SD)=Vin+Vf, DR conducts, clamping the
+        # magnetizing voltage at -Vin*(Np/Nr) and ramping the flux back down (the drain
+        # sits at the classic ~2*Vin reset plateau); DR blocks again when i_mag=0
+        # (reset complete). With Nr=Np the reset lasts exactly the on-time -> D<=0.5.
+        if tertiary:
+            dr = Part("Device", "D", ref="DR", value="DefaultDiode",
+                      Note="tertiary reset diode (returns magnetizing energy to VIN)")
+            sd = Net("SD")
+            t1["SC"] += gnd
+            sd += t1["SD"], dr["A"]
+            dr["K"] += vin
+
         # RCD drain clamp / core reset: DCL catches the turn-off spike (SW -> CLAMP),
-        # the reservoir CCL holds a voltage above VIN and RCL bleeds the caught
-        # magnetizing + leakage energy back to VIN (demagnetizing the core).
+        # the reservoir CCL holds a voltage above VIN and RCL bleeds the caught energy
+        # back to VIN. For the rcd reset this demagnetizes the core (dissipative). For
+        # the tertiary reset the winding handles the magnetizing energy; the RCD is
+        # sized (RCLAMP_TERT) to catch only the uncoupled LEAKAGE spike, its ~45 V clamp
+        # sitting ABOVE the ~2*Vin reset plateau so it never steals the reset.
         if rcd:
+            rcl_val = rclamp if rclamp is not None else (
+                RCLAMP_TERT if tertiary else RCLAMP)
             dcl = Part("Device", "D", ref="DCL", value="DefaultDiode",
                        Note="RCD clamp/reset diode (built-in Si generic)")
-            rcl = Part("Device", "R", ref="RCL", value=RCLAMP, Note="clamp bleed R")
+            rcl = Part("Device", "R", ref="RCL", value=rcl_val, Note="clamp bleed R")
             ccl = Part("Device", "C", ref="CCL", value=CCLAMP, Note="clamp reservoir C")
             clamp = Net("CLAMP")
             dcl["A"] += sw

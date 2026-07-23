@@ -143,6 +143,96 @@ def test_forward_saturable_variant_emits_flux_node():
     assert "sat(isat=50" in conv.model_provenance["T1"].name, conv.model_provenance["T1"].name
 
 
+def test_forward_tertiary_emits_reset_winding():
+    """Build-only (Stage 31.2): reset="tertiary" swaps T1 to Transformer_1P_2S and adds
+    a THIRD winding (SC/SD) + the reset diode DR. Linear emission: three coupled
+    inductors + a K card for every winding pair, the reset winding SC->GND / SD->DR
+    anode / DR cathode->VIN, and the RCD sized higher (RCLAMP_TERT) so it does not steal
+    the reset. The 31.1 single-secondary rcd path is byte-unchanged (asserted separately
+    in test_forward_emits_switch_transformer_and_reset)."""
+    _need_kicad10()
+    try:
+        from skidl.sim import skidl_flat_view
+        from skidl.sim.converter import SpiceConverter
+    except Exception:  # noqa: BLE001
+        pytest.skip("PySpice (skidl.sim) not installed")
+
+    import forward_skidl as F
+
+    ckt = F.forward(reset="tertiary")
+    refs = {p.ref for p in ckt.parts}
+    assert "DR" in refs, refs                                # the reset diode
+    with ckt:
+        conv = SpiceConverter(skidl_flat_view())
+        net = str(conv.convert(strict=True))
+
+    # three windings: primary + main secondary + the 1:1 reset winding (n2=1 -> ls2=lp).
+    assert "LT1_P VIN SW 0.000204" in net, net
+    assert "LT1_S1 SECA 0 0.000204" in net, net              # main secondary (SB grounded)
+    assert "LT1_S2 0 SD 0.000204" in net, net                # reset winding: dot SC=GND -> SD
+    # a K card for EVERY winding pair (incl. secondary<->reset).
+    assert "KT1_PS1 LT1_P LT1_S1 0.990148" in net, net
+    assert "KT1_PS2 LT1_P LT1_S2 0.990148" in net, net
+    assert "KT1_S1S2 LT1_S1 LT1_S2 0.990148" in net, net
+    # reset diode DR: anode at SD, cathode at VIN (returns magnetizing energy to the bus).
+    assert "DDR SD VIN" in net, net
+    # RCD sized above the ~2*Vin reset plateau (RCLAMP_TERT=2.2k) so it only catches the
+    # leakage spike -- it must NOT be the 1k of the 31.1 rcd reset.
+    assert "RRCL CLAMP VIN 2200" in net, net
+    assert "xfmr_2-sec" in conv.model_provenance["T1"].name, conv.model_provenance["T1"].name
+
+
+def test_forward_tertiary_saturable_emits_reset_coupling():
+    """Build-only (Stage 31.2): the saturable (isat) tertiary emission couples the reset
+    winding through the ideal E/F pair (ET1_S2/VT1_S2/FT1_S2) off the same flux node --
+    the reset-winding (DR) current is then readable via branch vt1_s2, as the staircase
+    driver reads it. The linear-form coupled inductors must be absent."""
+    _need_kicad10()
+    try:
+        from skidl.sim import skidl_flat_view
+        from skidl.sim.converter import SpiceConverter
+    except Exception:  # noqa: BLE001
+        pytest.skip("PySpice (skidl.sim) not installed")
+
+    import forward_skidl as F
+
+    ckt = F.forward(reset="tertiary", isat=50.0)
+    with ckt:
+        conv = SpiceConverter(skidl_flat_view())
+        net = str(conv.convert(strict=True))
+    assert "T1_flux" in net, net                              # behavioral flux node
+    assert "LT1_P" not in net, net                            # NOT the linear coupled form
+    # main secondary + reset winding, each an ideal E/F coupling off the flux node.
+    assert "ET1_S1 T1_s1v 0 T1_magp SW 1" in net, net
+    assert "ET1_S2 T1_s2v SD T1_magp SW 1" in net, net        # reset winding (dot SC=GND)
+    assert "VT1_S2 T1_s2v 0 0" in net, net                    # 0V ammeter -> branch vt1_s2
+    assert "FT1_S2 T1_magp SW VT1_S2 1" in net, net           # reflected onto magnetizing
+    assert "DDR SD VIN" in net, net                           # reset diode still there
+    assert "xfmr_sat_2sec" in conv.model_provenance["T1"].name, \
+        conv.model_provenance["T1"].name
+
+
+def test_forward_rcd_path_unchanged_by_tertiary_knob():
+    """The reset="rcd" default (31.1) is byte-identical after adding the tertiary knob:
+    single secondary, no SC/SD winding, no DR, RCL back at 1k."""
+    _need_kicad10()
+    try:
+        from skidl.sim import skidl_flat_view
+        from skidl.sim.converter import SpiceConverter
+    except Exception:  # noqa: BLE001
+        pytest.skip("PySpice (skidl.sim) not installed")
+
+    import forward_skidl as F
+
+    ckt = F.forward()                                         # default reset="rcd"
+    assert "DR" not in {p.ref for p in ckt.parts}
+    with ckt:
+        net = str(SpiceConverter(skidl_flat_view()).convert(strict=True))
+    assert "LT1_S SECA 0 0.000204" in net, net                # single secondary (1P_1S)
+    assert "LT1_S2" not in net and "DDR" not in net, net      # no reset winding / diode
+    assert "RRCL CLAMP VIN 1000" in net, net                  # 31.1 clamp value intact
+
+
 def test_forward_acceptance():
     """Gated live: the forward driver's W1-W4 all pass on real ngspice -- the open-loop
     forward delivers the buck-derived transfer (W1), transfers during the on-time (W2),
@@ -164,3 +254,28 @@ def test_forward_acceptance():
     if rc == 2:
         pytest.skip("ngspice backend unavailable")
     assert rc == 0, "forward acceptance driver reported a failed criterion"
+
+
+def test_forward_tertiary_acceptance():
+    """Gated live (Stage 31.2): the tertiary-reset driver's X1-X4 all pass on real
+    ngspice -- clean third-winding reset at D=0.42 (X1), per-cycle flux balance with a
+    zero-flux dwell (X2), staircase saturation running the magnetizing current away at
+    D=0.60 on the saturable core (X3), and the same D staying bounded on the high-knee
+    linear reference (X4)."""
+    _need_kicad10()
+    try:
+        from skidl.sim import simulate  # noqa: F401
+    except Exception:  # noqa: BLE001
+        pytest.skip("PySpice (skidl.sim) not installed")
+
+    import drive_forward_reset as DR
+
+    try:
+        rc = DR.main()
+    except Exception as e:  # noqa: BLE001
+        if "ngspice" in str(e).lower() or "shared" in str(e).lower():
+            pytest.skip(f"ngspice not available: {type(e).__name__}: {str(e)[:80]}")
+        raise
+    if rc == 2:
+        pytest.skip("ngspice backend unavailable")
+    assert rc == 0, "forward tertiary-reset acceptance driver reported a failed criterion"
