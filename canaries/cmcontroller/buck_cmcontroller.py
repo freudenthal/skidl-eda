@@ -1,0 +1,227 @@
+# -*- coding: utf-8 -*-
+"""Closed-loop peak-current-mode BUCK on the behavioral CMCONTROLLER (Stage 29.1).
+
+The architecture-proving spike for Stage 29: a **cycle-accurate, large-signal,
+CLOSED-LOOP** buck built on the new ``Sim_Device="CMCONTROLLER"`` behavioral core
+(oscillator -> gm error amp -> slope-comp current comparator -> SR latch -> gate ->
+internal switch stage). It **regulates a live rail** on ngspice from a t=0 soft
+start, and its regime cross-checks Stage 28.D's averaged small-signal model on the
+*same* power stage. This is the capability the evaluation had marked out of reach
+for encrypted current-mode controller ICs: closed-loop startup + load-transient
+recovery, not just an open-loop duty sweep (Stage 27/28) or an ``.ac`` margin (28.D).
+
+12 V -> 3.3 V @ ~1 A, 500 kHz, peak current mode. Real external parts (the
+controller emits only its own switch stage + latch):
+
+    VIN 12 --[U1 buck switch, latch-gated]-- SW --[L1 22u]-- VOUT --[Cout 47u]-- GND
+                                                              |                 Rload 3.3 (~1 A)
+    FB divider: R_top 43k (VOUT->FB) / R_bot 13.7k (FB->GND) -> 0.8 V ref at 3.31 V
+    VC network: Rc 22k in series with Cc 2.2n, VC->GND (type-II compensation)
+
+Two regimes on one power stage:
+  * ``cmc_buck(...)``          -- the CLOSED-LOOP switching CMCONTROLLER (``.tran``),
+    optionally with an IPULSE load step on VOUT for the transient-recovery test.
+  * ``averaged_buck_loop()``   -- the SAME L/Cout/Rload/divider/Rc/Cc on Stage 28.D's
+    ``BUCK mode=avg cmode=peak`` averaged model, FB tap split by a VSIN(ac=1) for
+    ``.ac`` loop gain (crossover / phase margin). The two must agree (the 29.1 gate).
+
+HONEST BOUNDARY (read before trusting a number): this is a **behavioral emulation
+of a current-mode controller's headline datasheet specs, NOT the encrypted silicon**.
+CCM only; no thermal / gate-charge / protection corner cases beyond the parameterized
+ones (max-duty here; soft-start/current-limit/foldback are Stage 29.3). GM, RI and
+the slope factor are datasheet-anchored *design inputs*, not measured from the part.
+The controller IC itself stays un-modeled; this replaces it with a generic B-source
+core (the Intusoft/Basso "write a generic model, adapt its parameters" method).
+
+DEVIATIONS (documented):
+  * The switch stage is **non-synchronous** (a freewheel diode, not a sync FET), so
+    the steady-state duty is the diode-corrected ``(Vout+Vf)/(Vin+Vf) ~= 0.31`` --
+    higher than the ideal ``Vout/Vin = 0.275``. Physically correct for the emitted
+    diode buck; the T2 duty band brackets it.
+  * A ``tss`` soft reference (default 60 us) ramps the internal VREF from 0 for a
+    clean startup; it eases the UIC ``.tran`` op point. The full soft-start machinery
+    (SS pin, current-limit foldback) is Stage 29.3 -- here it is a single ramp.
+"""
+
+from __future__ import annotations
+
+# --- design values ------------------------------------------------------------
+VIN = "12"
+VOUT_NOM = 3.3
+VREF = 0.8
+FSW = 500e3
+L = "22u"
+COUT = "47u"
+RLOAD = "3.3"          # ~1 A load
+R_TOP = "43k"          # FB divider top
+R_BOT = "13.7k"        # FB divider bottom -> 0.8 V at 3.31 V
+RC = "22k"             # VC compensation R
+CC = "2.2n"            # VC compensation C
+RI = 0.1               # effective current-sense gain
+GM = 250e-6            # error-amp transconductance
+MC = 1.5               # slope factor (averaged model knob)
+MCSLOPE = 0.1          # slope-comp ramp volts/period (switching model knob)
+SS_T = 60e-6           # soft-reference ramp time
+ISTEP = 0.5            # load-step magnitude (A)
+T_STEP = 300e-6        # load-step time
+
+# Ideal regulated rail from the real divider and the reference.
+VOUT_REG = VREF * (43.0 + 13.7) / 13.7   # ~= 3.311 V
+
+
+def _cmc_part(**fields):
+    """The CLOSED-LOOP controller stand-in. Pins carry the names the CMCONTROLLER
+    resolver keys on: VIN / SW / VOUT / FB / VC / GND. The controller emits its own
+    switch stage between VIN and SW; the user supplies L/Cout/divider/comp."""
+    from skidl import SKIDL, Part, Pin
+    from skidl.pin import pin_types
+
+    pins = [
+        Pin(num=1, name="VIN", func=pin_types.PWRIN),
+        Pin(num=2, name="SW", func=pin_types.PASSIVE),
+        Pin(num=3, name="VOUT", func=pin_types.PWROUT),
+        Pin(num=4, name="FB", func=pin_types.PASSIVE),     # divider tap
+        Pin(num=5, name="VC", func=pin_types.PASSIVE),     # compensation node
+        Pin(num=6, name="GND", func=pin_types.PWRIN),
+    ]
+    u = Part(tool=SKIDL, name="CMCONTROLLER", ref_prefix="U", ref="U1", pins=pins)
+    for k, v in fields.items():
+        setattr(u, k, v)
+    return u
+
+
+def cmc_buck(tss: float = SS_T, load_step_a: float = 0.0, t_step: float = T_STEP):
+    """The closed-loop CMCONTROLLER buck (``.tran``).
+
+    ``tss`` sets the soft-reference ramp time. ``load_step_a`` > 0 adds an IPULSE
+    current sink on VOUT (a load step at ``t_step``) for the transient-recovery
+    cross-check; 0 leaves a static ~1 A load for the plain regulation test."""
+    from skidl import Circuit, Net, Part
+
+    ckt = Circuit(name="cmc_buck")
+    with ckt:
+        u = _cmc_part(
+            Sim_Device="CMCONTROLLER",
+            Sim_Params=(
+                f"topology=buck fsw={FSW / 1e3:g}k vout={VOUT_NOM:g} vin={VIN} "
+                f"vref={VREF:g} ri={RI:g} gm={GM:g} mcslope={MCSLOPE:g} "
+                f"tss={tss:g}"
+            ),
+            Note="behavioral closed-loop peak-current-mode buck (NOT the switching IC)",
+        )
+        v1 = Part("Simulation_SPICE", "VDC", ref="V1", value=VIN, Note="input bus")
+        l1 = Part("Device", "L", ref="L1", value=L, Note="buck inductor SW->VOUT")
+        co = Part("Device", "C", ref="C1", value=COUT, Note="output cap 47u")
+        rl = Part("Device", "R", ref="RL", value=RLOAD, Note="load ~1 A")
+        rt = Part("Device", "R", ref="RT", value=R_TOP, Note="FB divider top")
+        rb = Part("Device", "R", ref="RB", value=R_BOT, Note="FB divider bottom")
+        rc = Part("Device", "R", ref="RC", value=RC, Note="VC comp R")
+        cc = Part("Device", "C", ref="CC", value=CC, Note="VC comp C")
+
+        vin, sw, vout, vc, ncc = (Net(n) for n in ("VIN", "SW", "VOUT", "VC", "NCC"))
+        fb, gnd = Net("FB"), Net("GND")
+        vin += v1[1], u["VIN"]
+        gnd += v1[2], u["GND"], co[2], rl[2], rb[2], cc[2]
+        sw += u["SW"], l1[1]
+        vout += l1[2], u["VOUT"], co[1], rl[1], rt[1]
+        fb += rt[2], rb[1], u["FB"]
+        vc += u["VC"], rc[1]
+        ncc += rc[2], cc[1]                       # Rc--Cc series midpoint
+
+        if load_step_a and load_step_a > 0:
+            istep = Part("Simulation_SPICE", "IPULSE", ref="ISTEP", value="0",
+                         Note="load step: extra current sink on VOUT")
+            # single step: rise at t_step, stay high past the run end (pw/per huge).
+            istep.Sim_Params = (
+                f"i1=0 i2={load_step_a:g} td={t_step:g} tr=1u tf=1u pw=1 per=2"
+            )
+            vout += istep[1]
+            gnd += istep[2]
+    return ckt
+
+
+def cmc_buck_highduty(mcslope: float = MCSLOPE, tss: float = SS_T):
+    """A D>0.5 operating point (12 V -> 8 V, D ~= 0.68) to exercise slope
+    compensation. Peak current mode subharmonic-oscillates (period-doubling) above
+    D=0.5 without slope comp; the default ``mcslope`` must damp it (Basso Fig. 5c/d).
+    The divider (90k/10k) regulates 8 V to the 0.8 V ref; load ~1 A (8 ohm)."""
+    from skidl import Circuit, Net, Part
+
+    ckt = Circuit(name="cmc_buck_highduty")
+    with ckt:
+        u = _cmc_part(
+            Sim_Device="CMCONTROLLER",
+            Sim_Params=(
+                f"topology=buck fsw={FSW / 1e3:g}k vout=8 vin={VIN} vref={VREF:g} "
+                f"ri={RI:g} gm={GM:g} mcslope={mcslope:g} tss={tss:g}"
+            ),
+            Note="D>0.5 buck (8 V) -- slope-comp subharmonic-stability point",
+        )
+        v1 = Part("Simulation_SPICE", "VDC", ref="V1", value=VIN)
+        l1 = Part("Device", "L", ref="L1", value=L)
+        co = Part("Device", "C", ref="C1", value=COUT)
+        rl = Part("Device", "R", ref="RL", value="8")     # ~1 A at 8 V
+        rt = Part("Device", "R", ref="RT", value="90k")
+        rb = Part("Device", "R", ref="RB", value="10k")
+        rc = Part("Device", "R", ref="RC", value=RC)
+        cc = Part("Device", "C", ref="CC", value=CC)
+        vin, sw, vout, vc, ncc = (Net(n) for n in ("VIN", "SW", "VOUT", "VC", "NCC"))
+        fb, gnd = Net("FB"), Net("GND")
+        vin += v1[1], u["VIN"]
+        gnd += v1[2], u["GND"], co[2], rl[2], rb[2], cc[2]
+        sw += u["SW"], l1[1]
+        vout += l1[2], u["VOUT"], co[1], rl[1], rt[1]
+        fb += rt[2], rb[1], u["FB"]
+        vc += u["VC"], rc[1]
+        ncc += rc[2], cc[1]
+    return ckt
+
+
+def averaged_buck_loop():
+    """The SAME buck power stage on Stage 28.D's averaged ``BUCK mode=avg cmode=peak``
+    model, FB tap split by a VSIN(ac=1) for the ``.ac`` loop-gain cross-check
+    (crossover / phase margin). The regulated-regime reference the closed-loop
+    switching model's load-transient recovery must be consistent with (29.1 gate)."""
+    from skidl import SKIDL, Circuit, Net, Part, Pin
+    from skidl.pin import pin_types
+
+    ckt = Circuit(name="avg_buck_loop")
+    with ckt:
+        pins = [
+            Pin(num=1, name="VIN", func=pin_types.PWRIN),
+            Pin(num=2, name="SW", func=pin_types.PASSIVE),
+            Pin(num=3, name="VC", func=pin_types.PASSIVE),
+            Pin(num=4, name="FB", func=pin_types.PASSIVE),
+            Pin(num=5, name="VOUT", func=pin_types.PWROUT),
+            Pin(num=6, name="GND", func=pin_types.PWRIN),
+        ]
+        u = Part(tool=SKIDL, name="BUCK", ref_prefix="U", ref="U1", pins=pins)
+        u.Sim_Device = "BUCK"
+        u.Sim_Params = (
+            f"fsw={FSW / 1e3:g}k vout={VOUT_NOM:g} vin={VIN} mode=avg cmode=peak "
+            f"vref={VREF:g} ri={RI:g} gm={GM:g} mc={MC:g}"
+        )
+        u.Note = "averaged peak-current-mode buck loop (28.D) -- .ac margin only"
+        v1 = Part("Simulation_SPICE", "VDC", ref="V1", value=VIN)
+        l1 = Part("Device", "L", ref="L1", value=L)
+        co = Part("Device", "C", ref="C1", value=COUT)
+        rl = Part("Device", "R", ref="RL", value=RLOAD)
+        rt = Part("Device", "R", ref="RT", value=R_TOP)
+        rb = Part("Device", "R", ref="RB", value=R_BOT)
+        rc = Part("Device", "R", ref="RC", value=RC)
+        cc = Part("Device", "C", ref="CC", value=CC)
+        vinj = Part("Simulation_SPICE", "VSIN", ref="VINJ", value="0",
+                    Note="loop-break injection (ac=1) at the FB tap")
+
+        vin, sw, vc, ncc, vout = (Net(n) for n in ("VIN", "SW", "VC", "NCC", "VOUT"))
+        fbp, fbc, gnd = Net("FBP"), Net("FBC"), Net("GND")
+        vin += v1[1], u["VIN"], l1[1]
+        gnd += v1[2], u["GND"], rb[2], co[2], rl[2], cc[2]
+        sw += u["SW"], l1[2]
+        vc += u["VC"], rc[1]
+        ncc += rc[2], cc[1]
+        vout += u["VOUT"], rt[1], co[1], rl[1]
+        # FB tap split by the injection source: A=FBP (plant) -> B=FBC (FB pin).
+        fbp += rt[2], rb[1], vinj[1]
+        fbc += vinj[2], u["FB"]
+    return ckt
