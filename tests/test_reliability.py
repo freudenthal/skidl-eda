@@ -15,8 +15,12 @@ from skidl_eda.sourcing import reliability as R
 
 def test_note_seeded_exact_prefix_and_absent():
     assert "FAILS-TO-LOAD" in (R.reliability_note("TLV3501") or "")
-    # a corpus variant name resolves to the base entry
-    assert "STIFF" in (R.reliability_note("LMC6482_NS") or "")
+    # a corpus variant suffix with no exact record of its own resolves to the
+    # base entry (LMC6482_NS now has its own measured record, so it no longer
+    # falls back -- use an unshadowed suffix and compare to the base note).
+    lmc_base = R.reliability_note("LMC6482")
+    assert lmc_base is not None
+    assert R.reliability_note("LMC6482_TR") == lmc_base
     assert "known-good" in (R.reliability_note("LT1364") or "")
     # a model no run has touched has no invented verdict
     assert R.reliability_note("SOME_RANDOM_PART_XYZ") is None
